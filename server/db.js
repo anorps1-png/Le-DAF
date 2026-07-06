@@ -49,10 +49,40 @@ const db = new sqlite3.Database(dbPath, (err) => {
           db.run("INSERT INTO settings (key, value) VALUES ('OPENAI_API_KEY', '')");
           db.run("INSERT INTO settings (key, value) VALUES ('DEEPSEEK_API_KEY', '')");
           db.run("INSERT INTO settings (key, value) VALUES ('DEFAULT_AI', 'gemini')");
+          db.run("INSERT INTO settings (key, value) VALUES ('OPENAI_BASE_URL', '')");
+          db.run("INSERT INTO settings (key, value) VALUES ('OPENAI_MODEL', '')");
+        } else if (!err) {
+          // Ensure new settings keys exist for backward compatibility
+          db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('OPENAI_BASE_URL', '')");
+          db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('OPENAI_MODEL', '')");
         }
       });
     });
   }
 });
+
+db.runSelect = function (sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!sql.trim().toUpperCase().startsWith('SELECT')) {
+      return reject(new Error('Only SELECT queries are allowed via runSelect.'));
+    }
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+};
+
+db.runUpdate = function (sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (sql.trim().toUpperCase().startsWith('SELECT')) {
+      return reject(new Error('SELECT queries should use runSelect.'));
+    }
+    db.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve({ changes: this.changes, lastID: this.lastID });
+    });
+  });
+};
 
 module.exports = db;

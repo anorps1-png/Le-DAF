@@ -5,9 +5,19 @@ const xlsx = require('xlsx');
 const db = require('./db');
 const { askAI } = require('./ai');
 
+const path = require('path');
+const fs = require('fs');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve public/exports directory for generated files
+const exportsDir = path.join(__dirname, 'public', 'exports');
+if (!fs.existsSync(exportsDir)) {
+  fs.mkdirSync(exportsDir, { recursive: true });
+}
+app.use('/public', express.static(path.join(__dirname, 'public')));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -22,13 +32,15 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const { GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEFAULT_AI } = req.body;
+  const { GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL } = req.body;
   const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
   
   if (GEMINI_API_KEY !== undefined) stmt.run('GEMINI_API_KEY', GEMINI_API_KEY);
   if (OPENAI_API_KEY !== undefined) stmt.run('OPENAI_API_KEY', OPENAI_API_KEY);
   if (DEEPSEEK_API_KEY !== undefined) stmt.run('DEEPSEEK_API_KEY', DEEPSEEK_API_KEY);
   if (DEFAULT_AI !== undefined) stmt.run('DEFAULT_AI', DEFAULT_AI);
+  if (OPENAI_BASE_URL !== undefined) stmt.run('OPENAI_BASE_URL', OPENAI_BASE_URL);
+  if (OPENAI_MODEL !== undefined) stmt.run('OPENAI_MODEL', OPENAI_MODEL);
   
   stmt.finalize();
   res.json({ success: true });
@@ -37,9 +49,13 @@ app.post('/api/settings', (req, res) => {
 // --- AI CHAT ROUTE ---
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message } = req.body;
-    const aiResponse = await askAI(message);
-    res.json({ response: aiResponse });
+    const { message, history } = req.body;
+    const aiResponse = await askAI(message, history);
+    if (aiResponse && typeof aiResponse === 'object') {
+      res.json({ response: aiResponse.text, proposal: aiResponse.proposal });
+    } else {
+      res.json({ response: aiResponse });
+    }
   } catch (error) {
     console.error("AI Error:", error);
     res.status(500).json({ error: error.message || "Erreur de communication avec l'IA. Vérifiez vos clés API." });
@@ -141,6 +157,134 @@ app.get('/api/journal', (req, res) => {
   });
 });
 
+app.post('/api/journal', (req, res) => {
+  const { code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit } = req.body;
+  
+  if (!code_journal || !date || !compte || !libelle) {
+    return res.status(400).json({ error: "Les champs Code Journal, Date, Compte et Libellé sont obligatoires." });
+  }
+
+  const query = `
+    INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+  
+  db.run(query, [
+    code_journal,
+    poste_budgetaire || '',
+    date,
+    String(compte),
+    String(compte_tiers || ''),
+    libelle,
+    String(n_facture || ''),
+    String(reference || ''),
+    parseFloat(debit) || 0,
+    parseFloat(credit) || 0
+  ], function(err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ success: true, id: this.lastID });
+  });
+});
+
+app.get('/api/template', (req, res) => {
+  const type = req.query.type;
+  let headers = [];
+  let sampleData = [];
+  let filename = "";
+
+  if (type === 'tiers') {
+    headers = ['type', 'nom', 'compte', 'solde'];
+    sampleData = [
+      { type: 'Client', nom: 'SOCIETE ABC', compte: '411100', solde: 500000 },
+      { type: 'Fournisseur', nom: 'FOURNISSEUR XYZ', compte: '401100', solde: -150000 }
+    ];
+    filename = 'template_tiers.xlsx';
+  } else {
+    // Default to journal
+    headers = ['code_journal', 'poste_budgetaire', 'date', 'compte', 'compte_tiers', 'libelle', 'n_facture', 'reference', 'debit', 'credit'];
+    sampleData = [
+      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-01', compte: '601100', compte_tiers: '', libelle: 'Achat de marchandises', n_facture: 'FACT-001', reference: 'REF-99', debit: 250000, credit: 0 },
+      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-01', compte: '401100', compte_tiers: 'FO-001', libelle: 'Dette Fournisseur', n_facture: 'FACT-001', reference: 'REF-99', debit: 0, credit: 250000 }
+    ];
+    filename = 'template_journal.xlsx';
+  }
+
+  try {
+    const ws = xlsx.utils.json_to_sheet(sampleData, { header: headers });
+    const wb = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(wb, ws, "Template");
+    const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur lors de la génération du template." });
+  }
+});
+
+app.get('/api/dashboard/stats', (req, res) => {
+  db.serialize(() => {
+    let stats = {
+      tresorerie: 0,
+      dettes: 0,
+      factures_fournisseurs: 0,
+      creances: 0,
+      factures_clients: 0,
+      ca: 0,
+      charges: 0
+    };
+
+    let completed = 0;
+    const checkComplete = () => {
+      completed++;
+      if (completed === 5) {
+        res.json(stats);
+      }
+    };
+
+    // 1. Trésorerie (Compte 52 Banque + 57 Caisse)
+    db.get("SELECT (SUM(debit) - SUM(credit)) AS solde FROM journal WHERE compte LIKE '52%' OR compte LIKE '57%'", (err, row) => {
+      if (!err && row) stats.tresorerie = row.solde || 0;
+      checkComplete();
+    });
+
+    // 2. Dettes Fournisseurs (401)
+    db.get("SELECT (SUM(credit) - SUM(debit)) AS solde, COUNT(DISTINCT CASE WHEN n_facture != '' AND n_facture IS NOT NULL THEN n_facture END) AS count FROM journal WHERE compte LIKE '401%'", (err, row) => {
+      if (!err && row) {
+        stats.dettes = Math.max(0, row.solde || 0);
+        stats.factures_fournisseurs = row.count || 0;
+      }
+      checkComplete();
+    });
+
+    // 3. Créances Clients (411)
+    db.get("SELECT (SUM(debit) - SUM(credit)) AS solde, COUNT(DISTINCT CASE WHEN n_facture != '' AND n_facture IS NOT NULL THEN n_facture END) AS count FROM journal WHERE compte LIKE '411%'", (err, row) => {
+      if (!err && row) {
+        stats.creances = Math.max(0, row.solde || 0);
+        stats.factures_clients = row.count || 0;
+      }
+      checkComplete();
+    });
+
+    // 4. Chiffre d'Affaires (70)
+    db.get("SELECT (SUM(credit) - SUM(debit)) AS solde FROM journal WHERE compte LIKE '70%'", (err, row) => {
+      if (!err && row) stats.ca = Math.max(0, row.solde || 0);
+      checkComplete();
+    });
+
+    // 5. Charges (6)
+    db.get("SELECT (SUM(debit) - SUM(credit)) AS solde FROM journal WHERE compte LIKE '6%'", (err, row) => {
+      if (!err && row) stats.charges = Math.max(0, row.solde || 0);
+      checkComplete();
+    });
+  });
+});
+
 // --- FINANCIAL STATEMENTS (ÉTATS FINANCIERS) ---
 app.get('/api/balance', (req, res) => {
   db.all(`
@@ -234,8 +378,9 @@ app.post('/api/audit/advice', async (req, res) => {
 
 app.post('/api/audit/apply', (req, res) => {
   const { sql } = req.body;
-  if (!sql || !sql.toUpperCase().startsWith("UPDATE")) {
-    return res.status(400).json({ error: "Seules les requêtes UPDATE sont autorisées pour la correction." });
+  const sqlUpper = sql ? sql.trim().toUpperCase() : "";
+  if (!sqlUpper.startsWith("UPDATE") && !sqlUpper.startsWith("INSERT") && !sqlUpper.startsWith("DELETE")) {
+    return res.status(400).json({ error: "Seules les requêtes UPDATE, INSERT et DELETE sont autorisées." });
   }
   db.run(sql, function(err) {
     if (err) res.status(500).json({ error: err.message });

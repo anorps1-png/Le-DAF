@@ -2,7 +2,14 @@ import { useState, useEffect } from 'react';
 import { Settings, Key, CheckCircle, Save } from 'lucide-react';
 
 export const SettingsModule = () => {
-  const [keys, setKeys] = useState({ GEMINI_API_KEY: '', OPENAI_API_KEY: '', DEFAULT_AI: 'gemini' });
+  const [keys, setKeys] = useState({ 
+    GEMINI_API_KEY: '', 
+    OPENAI_API_KEY: '', 
+    DEEPSEEK_API_KEY: '',
+    OPENAI_BASE_URL: '',
+    OPENAI_MODEL: '',
+    DEFAULT_AI: 'gemini' 
+  });
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -12,6 +19,8 @@ export const SettingsModule = () => {
         GEMINI_API_KEY: data.GEMINI_API_KEY || '', 
         OPENAI_API_KEY: data.OPENAI_API_KEY || '', 
         DEEPSEEK_API_KEY: data.DEEPSEEK_API_KEY || '',
+        OPENAI_BASE_URL: data.OPENAI_BASE_URL || '',
+        OPENAI_MODEL: data.OPENAI_MODEL || '',
         DEFAULT_AI: data.DEFAULT_AI || 'gemini' 
       }));
   }, []);
@@ -50,7 +59,7 @@ export const SettingsModule = () => {
         </div>
 
         <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Clé API OpenAI</label>
+          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Clé API OpenAI / Sublyx</label>
           <div style={{ position: 'relative' }}>
             <Key size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
             <input 
@@ -62,6 +71,28 @@ export const SettingsModule = () => {
               placeholder="sk-..." 
             />
           </div>
+        </div>
+
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>URL de Base OpenAI / Sublyx</label>
+          <input 
+            type="text" 
+            className="input" 
+            value={keys.OPENAI_BASE_URL}
+            onChange={e => setKeys({...keys, OPENAI_BASE_URL: e.target.value})}
+            placeholder="https://api.openai.com/v1 (Laisser vide pour l'officiel, utiliser https://api.sublyx.org/v1 pour Sublyx)" 
+          />
+        </div>
+
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Modèle OpenAI</label>
+          <input 
+            type="text" 
+            className="input" 
+            value={keys.OPENAI_MODEL}
+            onChange={e => setKeys({...keys, OPENAI_MODEL: e.target.value})}
+            placeholder="gpt-3.5-turbo (Laisser vide pour le modèle par défaut)" 
+          />
         </div>
 
         <div style={{ marginBottom: '1.5rem' }}>

@@ -31,7 +31,9 @@ const ChatbotIA = () => {
     if (!input.trim()) return;
     
     const userMsg = input;
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    const currentHistory = [...messages, { role: 'user', text: userMsg }];
+    
+    setMessages(currentHistory);
     setInput('');
     setLoading(true);
 
@@ -39,11 +41,22 @@ const ChatbotIA = () => {
       const res = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMsg })
+        body: JSON.stringify({ 
+          message: userMsg,
+          history: currentHistory.map(m => ({
+            role: m.role,
+            content: m.text
+          }))
+        })
       });
       const data = await res.json();
       if (data.response) {
-        setMessages(prev => [...prev, { role: 'assistant', text: data.response }]);
+        setMessages(prev => [...prev, { 
+          role: 'assistant', 
+          text: data.response,
+          proposal: data.proposal,
+          status: data.proposal ? 'pending' : null
+        }]);
       } else if (data.error) {
         setMessages(prev => [...prev, { role: 'assistant', text: `Erreur retournée par l'API : ${data.error}` }]);
       } else {
@@ -53,6 +66,28 @@ const ChatbotIA = () => {
       setMessages(prev => [...prev, { role: 'assistant', text: "Impossible de joindre le serveur. Le backend est-il démarré ?" }]);
     }
     setLoading(false);
+  };
+
+  const handleApprove = async (index, sql) => {
+    try {
+      const res = await fetch('http://localhost:3001/api/audit/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMessages(prev => prev.map((msg, i) => i === index ? { ...msg, status: 'approved' } : msg));
+      } else {
+        alert(`Erreur lors de l'exécution : ${data.error}`);
+      }
+    } catch (err) {
+      alert("Erreur de connexion avec le serveur.");
+    }
+  };
+
+  const handleReject = (index) => {
+    setMessages(prev => prev.map((msg, i) => i === index ? { ...msg, status: 'rejected' } : msg));
   };
 
   return (
@@ -74,7 +109,56 @@ const ChatbotIA = () => {
               whiteSpace: 'pre-wrap',
               backdropFilter: 'blur(10px)'
             }}>
-              {msg.text}
+              <div>{msg.text}</div>
+              
+              {msg.proposal && (
+                <div style={{
+                  marginTop: '1rem',
+                  padding: '1rem',
+                  background: 'rgba(15, 23, 42, 0.05)',
+                  border: '1px solid rgba(15, 23, 42, 0.1)',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.9rem'
+                }}>
+                  <div style={{ fontWeight: 600, color: 'var(--color-primary-dark)', display: 'flex', alignItems: 'center', gap: '0.25rem', marginBottom: '0.5rem' }}>
+                    📌 Proposition de modification SQL
+                  </div>
+                  <code style={{ display: 'block', padding: '0.5rem', background: '#0f172a', color: '#f8fafc', borderRadius: '4px', fontFamily: 'monospace', marginBottom: '0.75rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                    {msg.proposal.sql}
+                  </code>
+                  
+                  {msg.status === 'pending' && (
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button 
+                        onClick={() => handleApprove(idx, msg.proposal.sql)}
+                        className="btn btn-primary"
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
+                      >
+                        ✔️ Approuver & Exécuter
+                      </button>
+                      <button 
+                        onClick={() => handleReject(idx)}
+                        className="btn btn-secondary"
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.2)' }}
+                      >
+                        ❌ Rejeter
+                      </button>
+                    </div>
+                  )}
+
+                  {msg.status === 'approved' && (
+                    <div style={{ color: '#16a34a', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                      ✔️ Modification exécutée avec succès en base de données.
+                    </div>
+                  )}
+
+                  {msg.status === 'rejected' && (
+                    <div style={{ color: '#dc2626', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                      ❌ Proposition rejetée.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -107,28 +191,90 @@ const ChatbotIA = () => {
 };
 
 const Dashboard = () => {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const res = await fetch('http://localhost:3001/api/dashboard/stats');
+        const data = await res.json();
+        setStats(data);
+      } catch (err) {
+        console.error("Erreur stats dashboard:", err);
+      }
+      setLoading(false);
+    };
+    fetchStats();
+  }, []);
+
+  if (loading) {
+    return <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Chargement de la vue d'ensemble...</div>;
+  }
+
+  if (!stats) {
+    return <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-error)' }}>Erreur lors de la récupération des données.</div>;
+  }
+
+  const result = stats.ca - stats.charges;
+  const marginPercent = stats.ca > 0 ? Math.round((result / stats.ca) * 100) : 0;
+
   return (
     <>
       <div className="module-grid">
         <div className="card stat-card" style={{ background: 'linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%)', color: 'white', border: 'none' }}>
           <span className="stat-title" style={{ color: 'rgba(255,255,255,0.8)' }}>Trésorerie Globale (Toutes Banques)</span>
-          <span className="stat-value" style={{ color: 'white' }}>15 450 000 FCFA</span>
-          <span style={{ color: 'rgba(209, 250, 229, 0.9)', fontSize: '0.875rem', fontWeight: 500 }}>Situation saine</span>
+          <span className="stat-value" style={{ color: 'white' }}>{stats.tresorerie.toLocaleString()} FCFA</span>
+          <span style={{ color: stats.tresorerie >= 0 ? 'rgba(209, 250, 229, 0.9)' : '#fca5a5', fontSize: '0.875rem', fontWeight: 500 }}>
+            {stats.tresorerie >= 0 ? 'Situation saine' : 'Trésorerie déficitaire'}
+          </span>
         </div>
+        
         <div className="card stat-card">
-          <span className="stat-title">Dettes Fournisseurs (401xxx)</span>
-          <span className="stat-value">4 230 000 FCFA</span>
-          <span style={{ color: 'var(--color-error)', fontSize: '0.875rem', fontWeight: 500 }}>12 factures en attente</span>
+          <span className="stat-title">Dettes Fournisseurs (401)</span>
+          <span className="stat-value">{stats.dettes.toLocaleString()} FCFA</span>
+          <span style={{ color: stats.factures_fournisseurs > 0 ? 'var(--color-error)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
+            {stats.factures_fournisseurs} facture(s) enregistrée(s)
+          </span>
         </div>
+        
         <div className="card stat-card">
-          <span className="stat-title">Créances Clients (411xxx)</span>
-          <span className="stat-value">8 900 000 FCFA</span>
-          <span style={{ color: 'var(--color-warning)', fontSize: '0.875rem', fontWeight: 500 }}>Besoin de recouvrement</span>
+          <span className="stat-title">Créances Clients (411)</span>
+          <span className="stat-value">{stats.creances.toLocaleString()} FCFA</span>
+          <span style={{ color: stats.factures_clients > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
+            {stats.factures_clients} facture(s) en attente
+          </span>
         </div>
       </div>
-      <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-        <p style={{ fontSize: '1.25rem', marginBottom: '0.5rem', color: 'var(--color-text-main)', fontWeight: 600 }}>Synthèse Financière</p>
-        Tableau de bord de performance (Chiffre d'Affaires, Marge, BFR) généré en temps réel par l'Agent OHADA.
+
+      <div className="card" style={{ padding: '2rem' }}>
+        <h4 style={{ marginBottom: '1.5rem', color: 'var(--color-text-main)', fontSize: '1.25rem', fontWeight: 600 }}>Synthèse Financière Réelle</h4>
+        
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+          <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
+            <span style={{ display: 'block', fontSize: '0.875rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>Chiffre d'Affaires (Ventes 70)</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-success)' }}>{stats.ca.toLocaleString()} FCFA</span>
+          </div>
+          
+          <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
+            <span style={{ display: 'block', fontSize: '0.875rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>Charges d'Exploitation (Classe 6)</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-error)' }}>{stats.charges.toLocaleString()} FCFA</span>
+          </div>
+
+          <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
+            <span style={{ display: 'block', fontSize: '0.875rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>Marge / Résultat Net Brut</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: result >= 0 ? 'var(--color-success)' : 'var(--color-error)' }}>
+              {result.toLocaleString()} FCFA
+            </span>
+            <span style={{ display: 'block', fontSize: '0.75rem', marginTop: '0.25rem', color: 'var(--color-text-muted)' }}>
+              Taux de marge : {marginPercent}%
+            </span>
+          </div>
+        </div>
+
+        <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
+          ⚠️ Les calculs ci-dessus sont mis à jour en temps réel à partir de votre journal général d'écritures.
+        </p>
       </div>
     </>
   );

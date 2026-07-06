@@ -64,16 +64,33 @@ export const ImportModule = () => {
       </h3>
       
       <div style={{ maxWidth: '600px' }}>
-        <p style={{ color: 'var(--color-text-muted)', marginBottom: '2rem' }}>
-          Importez vos fichiers Excel (.xlsx) pour alimenter la base de données de l'Agent. Vous pouvez importer votre Grand Livre, Balance, Journal ou Fichier Tiers.
+        <p style={{ color: 'var(--color-text-muted)', marginBottom: '1.5rem' }}>
+          Importez vos fichiers Excel (.xlsx) pour alimenter la base de données de l'Agent. Utilisez les modèles fournis ci-dessous pour structurer vos données.
         </p>
+
+        {/* Templates Download Section */}
+        <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem', flexWrap: 'wrap' }}>
+          <a 
+            href="http://localhost:3001/api/template?type=journal" 
+            className="btn btn-secondary" 
+            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', border: '1px solid var(--color-border)', padding: '0.5rem 1rem', borderRadius: 'var(--radius-md)', background: 'var(--color-bg-light)', color: 'var(--color-text-main)', fontWeight: 500 }}
+          >
+            📥 Modèle Journal (.xlsx)
+          </a>
+          <a 
+            href="http://localhost:3001/api/template?type=tiers" 
+            className="btn btn-secondary" 
+            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', border: '1px solid var(--color-border)', padding: '0.5rem 1rem', borderRadius: 'var(--radius-md)', background: 'var(--color-bg-light)', color: 'var(--color-text-main)', fontWeight: 500 }}
+          >
+            📥 Modèle Tiers (.xlsx)
+          </a>
+        </div>
 
         <div style={{ marginBottom: '1.5rem' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Type de données à importer</label>
           <select className="input" value={type} onChange={e => setType(e.target.value)}>
             <option value="journal">Journal Comptable (Grand Livre)</option>
             <option value="tiers">Fichier Tiers (Clients / Fournisseurs)</option>
-            <option value="balance">Balance (Non implémenté)</option>
           </select>
         </div>
 
@@ -106,8 +123,8 @@ export const ImportModule = () => {
           <div style={{ 
             marginTop: '1rem', 
             padding: '1rem', 
-            background: status.includes('Succès') ? 'var(--color-success-bg)' : 'var(--color-error-bg)',
-            color: status.includes('Succès') ? 'var(--color-success)' : 'var(--color-error)',
+            background: status.includes('Succès') ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+            color: status.includes('Succès') ? '#15803d' : '#b91c1c',
             borderRadius: 'var(--radius-md)',
             display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 500
           }}>

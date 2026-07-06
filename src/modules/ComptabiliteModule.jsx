@@ -7,6 +7,19 @@ export const ComptabiliteModule = () => {
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef(null);
   const [uploadStatus, setUploadStatus] = useState('');
+  const [manualData, setManualData] = useState({
+    code_journal: 'OD',
+    poste_budgetaire: '',
+    date: new Date().toISOString().split('T')[0],
+    compte: '',
+    compte_tiers: '',
+    libelle: '',
+    n_facture: '',
+    reference: '',
+    debit: '0',
+    credit: '0'
+  });
+  const [manualStatus, setManualStatus] = useState('');
 
   const fetchEtats = async (endpoint) => {
     setLoading(true);
@@ -54,33 +67,227 @@ export const ComptabiliteModule = () => {
     }
   };
 
+  const handleManualSubmit = async (e) => {
+    e.preventDefault();
+    if (!manualData.code_journal || !manualData.date || !manualData.compte || !manualData.libelle) {
+      setManualStatus('Erreur : Veuillez remplir tous les champs obligatoires.');
+      return;
+    }
+    setLoading(true);
+    setManualStatus('Enregistrement de l\'écriture...');
+    try {
+      const res = await fetch('http://localhost:3001/api/journal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(manualData)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setManualStatus('Succès : L\'écriture a été enregistrée avec succès.');
+        setManualData(prev => ({
+          ...prev,
+          compte: '',
+          compte_tiers: '',
+          libelle: '',
+          n_facture: '',
+          reference: '',
+          debit: '0',
+          credit: '0'
+        }));
+      } else {
+        setManualStatus(`Erreur : ${data.error}`);
+      }
+    } catch (err) {
+      setManualStatus('Erreur : Connexion au serveur impossible.');
+    }
+    setLoading(false);
+  };
+
   const renderContent = () => {
     if (loading) return <div style={{ padding: '2rem', textAlign: 'center' }}>Chargement des données comptables...</div>;
 
     switch (activeTab) {
       case 'saisie':
         return (
-          <div>
-            <div 
-              style={{ border: '2px dashed var(--color-primary-light)', borderRadius: 'var(--radius-xl)', padding: '4rem 2rem', textAlign: 'center', marginBottom: '2rem', background: 'rgba(255,255,255,0.4)', cursor: 'pointer', transition: 'all 0.3s' }} 
-              onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.7)'} 
-              onMouseOut={e => e.currentTarget.style.background = 'rgba(255,255,255,0.4)'}
-              onClick={() => fileInputRef.current.click()}
-            >
-              <BrainCircuit size={56} style={{ color: 'var(--color-primary)', margin: '0 auto 1rem' }} />
-              <p style={{ fontWeight: 600, fontSize: '1.25rem', color: 'var(--color-text-main)' }}>Déposez vos pièces comptables ou un fichier Excel (Factures)</p>
-              <p style={{ fontSize: '0.95rem', color: 'var(--color-text-muted)', maxWidth: '450px', margin: '0.5rem auto' }}>
-                L'Agent va extraire les données, les imputer dans les bons comptes SYSCOHADA et mettre à jour le Bilan et le Compte de Résultat automatiquement.
-              </p>
-              <button className="btn btn-primary" style={{ marginTop: '1.5rem' }}>Parcourir les documents</button>
-              <input type="file" accept=".xlsx, .xls, .csv, .pdf" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '2rem' }}>
+            {/* Colonne 1 : Importation de fichiers */}
+            <div>
+              <h4 style={{ marginBottom: '1rem', color: 'var(--color-primary)' }}>Importation de fichiers</h4>
+              <div 
+                style={{ border: '2px dashed var(--color-primary-light)', borderRadius: 'var(--radius-xl)', padding: '4rem 2rem', textAlign: 'center', marginBottom: '2rem', background: 'rgba(255,255,255,0.4)', cursor: 'pointer', transition: 'all 0.3s' }} 
+                onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.7)'} 
+                onMouseOut={e => e.currentTarget.style.background = 'rgba(255,255,255,0.4)'}
+                onClick={() => fileInputRef.current.click()}
+              >
+                <BrainCircuit size={56} style={{ color: 'var(--color-primary)', margin: '0 auto 1rem' }} />
+                <p style={{ fontWeight: 600, fontSize: '1.25rem', color: 'var(--color-text-main)' }}>Déposez vos factures ou relevés bancaires</p>
+                <p style={{ fontSize: '0.95rem', color: 'var(--color-text-muted)', maxWidth: '450px', margin: '0.5rem auto' }}>
+                  L'Agent va extraire les données, les imputer dans les bons comptes SYSCOHADA et mettre à jour le Bilan et le Compte de Résultat automatiquement.
+                </p>
+                <button className="btn btn-primary" style={{ marginTop: '1.5rem' }}>Parcourir les documents</button>
+                <input type="file" accept=".xlsx, .xls, .csv, .pdf" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
+              </div>
+
+              {uploadStatus && (
+                <div style={{ padding: '1rem', background: uploadStatus.includes('Succès') ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)', color: uploadStatus.includes('Succès') ? '#15803d' : '#b91c1c', borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 500, justifyContent: 'center' }}>
+                  <CheckCircle size={18} /> {uploadStatus}
+                </div>
+              )}
             </div>
 
-            {uploadStatus && (
-              <div style={{ padding: '1rem', background: uploadStatus.includes('Succès') ? 'var(--color-success-bg)' : 'var(--color-error-bg)', color: uploadStatus.includes('Succès') ? 'var(--color-success)' : 'var(--color-error)', borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 500, justifyContent: 'center' }}>
-                <CheckCircle size={18} /> {uploadStatus}
-              </div>
-            )}
+            {/* Colonne 2 : Saisie Manuelle */}
+            <div>
+              <h4 style={{ marginBottom: '1rem', color: 'var(--color-primary-dark)' }}>Saisie manuelle d'écriture</h4>
+              <form onSubmit={handleManualSubmit} style={{ background: 'rgba(255,255,255,0.3)', padding: '1.5rem', borderRadius: 'var(--radius-xl)', border: '1px solid var(--color-border)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Code Journal *</label>
+                    <select 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      value={manualData.code_journal} 
+                      onChange={e => setManualData({...manualData, code_journal: e.target.value})}
+                    >
+                      <option value="AC">AC - Achat</option>
+                      <option value="VE">VE - Vente</option>
+                      <option value="BQ">BQ - Banque</option>
+                      <option value="OD">OD - Opérations Diverses</option>
+                      <option value="CA">CA - Caisse</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Date *</label>
+                    <input 
+                      type="date" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      value={manualData.date} 
+                      onChange={e => setManualData({...manualData, date: e.target.value})} 
+                      required 
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>N° Compte *</label>
+                    <input 
+                      type="text" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="Ex: 601100" 
+                      value={manualData.compte} 
+                      onChange={e => setManualData({...manualData, compte: e.target.value})} 
+                      required 
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Compte Tiers</label>
+                    <input 
+                      type="text" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="Ex: FO-001" 
+                      value={manualData.compte_tiers} 
+                      onChange={e => setManualData({...manualData, compte_tiers: e.target.value})} 
+                    />
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Libellé *</label>
+                  <input 
+                    type="text" 
+                    className="input" 
+                    style={{ padding: '0.5rem' }}
+                    placeholder="Ex: Facture de marchandises" 
+                    value={manualData.libelle} 
+                    onChange={e => setManualData({...manualData, libelle: e.target.value})} 
+                    required 
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.75rem', fontWeight: 500 }}>Budget</label>
+                    <input 
+                      type="text" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="Ex: ACHATS" 
+                      value={manualData.poste_budgetaire} 
+                      onChange={e => setManualData({...manualData, poste_budgetaire: e.target.value})} 
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.75rem', fontWeight: 500 }}>N° Fact.</label>
+                    <input 
+                      type="text" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="FA-26-004" 
+                      value={manualData.n_facture} 
+                      onChange={e => setManualData({...manualData, n_facture: e.target.value})} 
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.75rem', fontWeight: 500 }}>Réf.</label>
+                    <input 
+                      type="text" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="CHÈQUE 99" 
+                      value={manualData.reference} 
+                      onChange={e => setManualData({...manualData, reference: e.target.value})} 
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Débit</label>
+                    <input 
+                      type="number" 
+                      step="0.01" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="0" 
+                      value={manualData.debit} 
+                      onChange={e => setManualData({...manualData, debit: e.target.value})} 
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Crédit</label>
+                    <input 
+                      type="number" 
+                      step="0.01" 
+                      className="input" 
+                      style={{ padding: '0.5rem' }}
+                      placeholder="0" 
+                      value={manualData.credit} 
+                      onChange={e => setManualData({...manualData, credit: e.target.value})} 
+                    />
+                  </div>
+                </div>
+
+                <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '0.5rem' }}>
+                  Enregistrer
+                </button>
+
+                {manualStatus && (
+                  <div style={{ 
+                    marginTop: '1rem', 
+                    padding: '0.75rem', 
+                    background: manualStatus.includes('Succès') ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                    color: manualStatus.includes('Succès') ? '#15803d' : '#b91c1c',
+                    borderRadius: 'var(--radius-md)',
+                    display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 500, fontSize: '0.85rem'
+                  }}>
+                    <CheckCircle size={14} /> {manualStatus}
+                  </div>
+                )}
+              </form>
+            </div>
           </div>
         );
 
