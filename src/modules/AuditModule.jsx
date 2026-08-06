@@ -15,7 +15,7 @@ export const AuditModule = () => {
   const fetchAudit = async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:3001/api/audit');
+      const res = await fetch('/api/audit');
       const data = await res.json();
       setAnomalies(data);
     } catch (e) {
@@ -29,7 +29,7 @@ export const AuditModule = () => {
     setAiAdvice(null);
     setLoadingAi(true);
     try {
-      const res = await fetch('http://localhost:3001/api/audit/advice', {
+      const res = await fetch('/api/audit/advice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ anomaly: { type: anomalyGroup.type, rule: anomalyGroup.description, data: ligne } })
@@ -45,7 +45,7 @@ export const AuditModule = () => {
   const applyCorrection = async () => {
     if (!aiAdvice?.sql) return;
     try {
-      const res = await fetch('http://localhost:3001/api/audit/apply', {
+      const res = await fetch('/api/audit/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql: aiAdvice.sql })

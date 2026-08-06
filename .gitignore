@@ -26,4 +26,13 @@ dist-ssr
 # SQLite databases
 *.sqlite
 *.db
+*.sqlite-journal
+
+# Installer build artifacts (rebuilt locally, not source)
+installer-output/
+packaging/node-v24.15.0-win-x64/
+packaging/stage/
+packaging/node-portable.zip
+packaging/*.log
+packaging/*.flag
 

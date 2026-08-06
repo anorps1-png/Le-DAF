@@ -13,7 +13,7 @@ export const SettingsModule = () => {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/settings')
+    fetch('/api/settings')
       .then(res => res.json())
       .then(data => setKeys({ 
         GEMINI_API_KEY: data.GEMINI_API_KEY || '', 
@@ -26,7 +26,7 @@ export const SettingsModule = () => {
   }, []);
 
   const handleSave = async () => {
-    await fetch('http://localhost:3001/api/settings', {
+    await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(keys)

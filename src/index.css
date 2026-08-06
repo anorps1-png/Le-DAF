@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
-
 :root {
   /* Color Palette - Soft Blue Professional Theme */
   --color-primary: #3b82f6; /* Soft Blue */
@@ -27,7 +25,7 @@
   --color-error-bg: rgba(254, 226, 226, 0.8);
 
   /* Typography */
-  --font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+  --font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   
   /* Spacing */
   --spacing-1: 0.25rem;

@@ -6,7 +6,7 @@ export const TiersModule = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/tiers')
+    fetch('/api/tiers')
       .then(res => res.json())
       .then(data => {
         setTiers(data);

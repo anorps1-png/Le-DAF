@@ -38,19 +38,315 @@ async function getFinancialContext() {
   });
 }
 
+async function getBusinessMemoryContext() {
+  return new Promise((resolve) => {
+    db.all("SELECT * FROM business_rules WHERE is_active = 1 ORDER BY confidence_score DESC", (err, rules) => {
+      if (err) rules = [];
+      db.all("SELECT title, category, content FROM knowledge_docs ORDER BY id DESC", (err, docs) => {
+        if (err) docs = [];
+        
+        let memoryText = "--- MÉMOIRE ET RÈGLES MÉTIER DE L'ENTREPRISE (DAF BRAIN) ---\n";
+        
+        if (docs.length > 0) {
+          memoryText += "DOCUMENTS DE RÉFÉRENCE & PLAN COMPTABLE CHARGÉS EN MÉMOIRE (HÔPITAL / SYSCOHADA) :\n";
+          docs.forEach(d => {
+            memoryText += `\n=== DOCUMENT : [${d.category}] ${d.title} ===\n${d.content}\n`;
+          });
+        }
+        
+        if (rules.length > 0) {
+          memoryText += "\nRÈGLES D'IMPUTATION & GESTION ENREGISTRÉES EN MÉMOIRE :\n";
+          rules.forEach(r => {
+            const src = r.auto_learned ? "Appris via ML" : "Document / Règle Métier";
+            memoryText += `- Motif/Mot-clé: "${r.pattern}" ➔ Compte: ${r.target_account || 'N/A'}, Journal: ${r.target_journal || 'N/A'}, TVA: ${r.vat_rate || 0}% (Confiance: ${(r.confidence_score * 100).toFixed(0)}%, Source: ${src}${r.description ? `, ${r.description}` : ''})\n`;
+          });
+        }
+        
+        if (docs.length === 0 && rules.length === 0) {
+          memoryText += "Aucune règle spécifique enregistrée pour le moment.\n";
+        }
+        
+        resolve(memoryText);
+      });
+    });
+  });
+}
+
+function normalizeText(text) {
+  if (!text) return '';
+  return String(text)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function determineSyscohadaAccount(libelle, compteTiers = '', isAchat = true) {
+  const fullText = normalizeText(`${libelle} ${compteTiers}`);
+
+  // PLAN COMPTABLE HOSPITALIER & SANTE (SYSCOHADA SPÉCIFIQUE HÔPITAUX)
+  if (!isAchat) {
+    // Recettes & Produits (Classe 7)
+    if (fullText.includes('soins') || fullText.includes('consultation') || fullText.includes('hospitalisation') || fullText.includes('acte') || fullText.includes('chirurg') || fullText.includes('nuit')) {
+      return { target_account: '706200', target_journal: 'VE', category: 'Recettes Soins & Hospitalisation (706200)' };
+    }
+    if (fullText.includes('conseil') || fullText.includes('prestation') || fullText.includes('service') || fullText.includes('etude') || fullText.includes('assistance') || fullText.includes('formation') || fullText.includes('expertise') || fullText.includes('maintenance')) {
+      return { target_account: '706100', target_journal: 'VE', category: 'Prestations de Services Vendues (706100)' };
+    }
+    return { target_account: '701100', target_journal: 'VE', category: 'Ventes de Marchandises (701100)' };
+  }
+
+  // Achats & Charges Hôpital (Classe 6 SYSCOHADA)
+  // 1. Médicaments, Vaccins, Pharmacie, Réactifs, Poches de Sang (603100)
+  if (fullText.includes('medicament') || fullText.includes('pharmacie') || fullText.includes('vaccin') || fullText.includes('reactif') || fullText.includes('sang') || fullText.includes('serum') || fullText.includes('sirop') || fullText.includes('comprime')) {
+    return { target_account: '603100', target_journal: 'AC', category: 'Achats de Produits Pharmaceutiques & Médicaments (603100)' };
+  }
+
+  // 2. Dispositifs Médicaux, Seringues, Compresses, Gants, Bandes, Pansements (603200)
+  if (fullText.includes('dispositif medical') || fullText.includes('seringue') || fullText.includes('compresse') || fullText.includes('gant') || fullText.includes('bande') || fullText.includes('pansement') || fullText.includes('catheter') || fullText.includes('aiguille')) {
+    return { target_account: '603200', target_journal: 'AC', category: 'Dispositifs & Matériels Médicaux Consommables (603200)' };
+  }
+
+  // 3. Oxygène Médical & Gaz Médicaux (603300)
+  if (fullText.includes('oxygene') || fullText.includes('gaz medical') || fullText.includes('azote') || fullText.includes('bouteille d\'oxygene') || fullText.includes('bouteilles d\'oxygene') || fullText.includes('oxygene medical')) {
+    return { target_account: '603300', target_journal: 'AC', category: 'Oxygène & Gaz Médicaux (603300)' };
+  }
+
+  // 4. Linge Médical, Blouses, Draps (605100)
+  if (fullText.includes('linge') || fullText.includes('blouse') || fullText.includes('drap') || fullText.includes('uniforme medical')) {
+    return { target_account: '605100', target_journal: 'AC', category: 'Linge Médical & Consommables (605100)' };
+  }
+
+  // 5. Honoraires Médecins Vacataires, Chirurgiens, Spécialistes (622100)
+  if (fullText.includes('vacation') || fullText.includes('medecin') || fullText.includes('chirurgien') || fullText.includes('specialiste') || fullText.includes('docteur')) {
+    return { target_account: '622100', target_journal: 'AC', category: 'Honoraires Médecins Vacataires & Spécialistes (622100)' };
+  }
+
+  // 6. DASRI, Traitement Déchets Infectieux & Stérilisation (638400)
+  if (fullText.includes('dasri') || fullText.includes('infectieux') || fullText.includes('sterilisation') || fullText.includes('dechets medic')) {
+    return { target_account: '638400', target_journal: 'AC', category: 'Traitement des Déchets Infectieux DASRI (638400)' };
+  }
+
+  // 7. Équipements & Matériel Biomédical Immobilisé (241100)
+  if (fullText.includes('echographe') || fullText.includes('radio') || fullText.includes('scanner') || fullText.includes('irm') || fullText.includes('biomedical') || fullText.includes('equipement medical')) {
+    return { target_account: '241100', target_journal: 'AC', category: 'Matériel & Équipements Biomédicaux (241100)' };
+  }
+
+  // Internet, Téléphonie, Flottes, Télécommunications
+  if (fullText.includes('internet') || fullText.includes('fibre') || fullText.includes('telephone') || fullText.includes('flotte') || fullText.includes('lignes') || fullText.includes('abonnement') || fullText.includes('orange') || fullText.includes('mtn') || fullText.includes('moov') || fullText.includes('wave') || fullText.includes('telecom') || fullText.includes('wifi') || fullText.includes('recharge') || fullText.includes('forfait') || fullText.includes('data')) {
+    return { target_account: '628100', target_journal: 'AC', category: 'Frais de Télécommunication & Internet (628100)' };
+  }
+
+  // 2. Énergie, Carburant, Carburant Véhicules, Électricité, Eau
+  if (fullText.includes('carburant') || fullText.includes('essence') || fullText.includes('gazole') || fullText.includes('diesel') || fullText.includes('station') || fullText.includes('total') || fullText.includes('shell') || fullText.includes('cie') || fullText.includes('sodeci') || fullText.includes('electricite') || fullText.includes('eau') || fullText.includes('gaz') || fullText.includes('pass') || fullText.includes('cartes pass')) {
+    return { target_account: '605200', target_journal: 'AC', category: 'Achats d\'Énergie & Carburants (605200)' };
+  }
+
+  // 3. Loyers, Baux, Charges Locatives
+  if (fullText.includes('loyer') || fullText.includes('bail') || fullText.includes('location') || fullText.includes('palmiers') || fullText.includes('sci') || fullText.includes('batiment') || fullText.includes('bureau') || fullText.includes('locaux') || fullText.includes('immobilier')) {
+    return { target_account: '632100', target_journal: 'AC', category: 'Loyers & Charges Locatives (632100)' };
+  }
+
+  // 4. Honoraires, Conseils, Audits, Assistance Juridique/Comptable
+  if (fullText.includes('honoraire') || fullText.includes('conseil') || fullText.includes('audit') || fullText.includes('assistance') || fullText.includes('avocat') || fullText.includes('notaire') || fullText.includes('expert') || fullText.includes('cabinet') || fullText.includes('juridique') || fullText.includes('comptable') || fullText.includes('prestataire')) {
+    return { target_account: '622100', target_journal: 'AC', category: 'Honoraires & Prestations d\'Études (622100)' };
+  }
+
+  // 5. Entretien, Réparations, Maintenance, Nettoyage, Gardiennage
+  if (fullText.includes('entretien') || fullText.includes('reparation') || fullText.includes('maintenance') || fullText.includes('vidange') || fullText.includes('nettoyage') || fullText.includes('garage') || fullText.includes('pieces') || fullText.includes('gardiennage') || fullText.includes('securite')) {
+    return { target_account: '638100', target_journal: 'AC', category: 'Entretien & Réparations (638100)' };
+  }
+
+  // 6. Déplacements, Missions, Voyage, Transport
+  if (fullText.includes('deplacement') || fullText.includes('mission') || fullText.includes('voyage') || fullText.includes('hotel') || fullText.includes('billet') || fullText.includes('vol') || fullText.includes('taxi') || fullText.includes('transport') || fullText.includes('frais de port') || fullText.includes('livraison')) {
+    return { target_account: '625100', target_journal: 'AC', category: 'Voyages & Déplacements (625100)' };
+  }
+
+  // 7. Assurance, Primes
+  if (fullText.includes('assurance') || fullText.includes('prime') || fullText.includes('nsia') || fullText.includes('sanlam') || fullText.includes('allianz') || fullText.includes('saham') || fullText.includes('couverture')) {
+    return { target_account: '631100', target_journal: 'AC', category: 'Primes d\'Assurances (631100)' };
+  }
+
+  // 8. Frais bancaires & commissions
+  if (fullText.includes('frais banc') || fullText.includes('commission') || fullText.includes('tenue de compte') || fullText.includes('agios') || fullText.includes('virement')) {
+    return { target_account: '627100', target_journal: 'BQ', category: 'Frais Bancaires & Commissions (627100)' };
+  }
+
+  // 9. Fournitures de bureau & petits matériels
+  if (fullText.includes('fourniture') || fullText.includes('bureau') || fullText.includes('papeterie') || fullText.includes('ramme') || fullText.includes('cartouche') || fullText.includes('encre') || fullText.includes('toner') || fullText.includes('consommables') || fullText.includes('imprime')) {
+    return { target_account: '605100', target_journal: 'AC', category: 'Fournitures de Bureau & Matériels (605100)' };
+  }
+
+  // 10. Publicité & Marketing
+  if (fullText.includes('publicite') || fullText.includes('marketing') || fullText.includes('communication') || fullText.includes('spot') || fullText.includes('flyer') || fullText.includes('banniere') || fullText.includes('sponsoring') || fullText.includes('evenement')) {
+    return { target_account: '623100', target_journal: 'AC', category: 'Publicité & Marketing (623100)' };
+  }
+
+  // 11. Matières premières & Intrants
+  if (fullText.includes('matiere premiere') || fullText.includes('intrant') || fullText.includes('emballage') || fullText.includes('conditionnement')) {
+    return { target_account: '602100', target_journal: 'AC', category: 'Achats de Matières Premières (602100)' };
+  }
+
+  // 12. Prestations de service générales / Sous-traitance
+  if (fullText.includes('sous-traitance') || fullText.includes('soustraitance') || fullText.includes('travaux')) {
+    return { target_account: '604100', target_journal: 'AC', category: 'Achats d\'Études & Prestations (604100)' };
+  }
+
+  return { target_account: '601100', target_journal: 'AC', category: 'Achats de Marchandises (601100)' };
+}
+
+async function matchTransactionWithMemory(libelle, compteTiers = '', isAchat = true) {
+  return new Promise((resolve) => {
+    db.all("SELECT * FROM business_rules WHERE is_active = 1 ORDER BY confidence_score DESC, occurrences DESC", (err, rules) => {
+      const normLib = normalizeText(libelle);
+      const normTiers = normalizeText(compteTiers);
+      const fullSearch = `${normLib} ${normTiers}`;
+
+      if (!err && rules && rules.length > 0) {
+        for (const rule of rules) {
+          const normPattern = normalizeText(rule.pattern);
+          if (!normPattern) continue;
+
+          let isMatch = false;
+          if (rule.condition_type === 'exact') {
+            isMatch = normLib === normPattern || normTiers === normPattern;
+          } else if (rule.condition_type === 'starts_with') {
+            isMatch = normLib.startsWith(normPattern) || normTiers.startsWith(normPattern);
+          } else {
+            // Default: 'contains'
+            isMatch = fullSearch.includes(normPattern);
+          }
+
+          // Une règle ne doit jamais pointer vers un compte de tiers/trésorerie/capitaux : le
+          // "target_account" représente la nature de la charge/produit (classes 2,3,6,7,8), jamais
+          // sa contrepartie comptable. Filet de sécurité si une règle corrompue subsiste malgré
+          // tout en base (ex: créée manuellement par erreur).
+          const targetClasse = String(rule.target_account || '').charAt(0);
+          if (['1', '4', '5', '9'].includes(targetClasse)) continue;
+
+          if (isMatch) {
+            const autoApply = (rule.confidence_score >= 0.80);
+            return resolve({
+              matched: true,
+              rule,
+              auto_apply: autoApply,
+              target_account: rule.target_account,
+              target_journal: rule.target_journal,
+              vat_rate: rule.vat_rate || 0,
+              confidence_score: rule.confidence_score,
+              source: rule.auto_learned ? 'Machine Learning' : 'Règle Métier'
+            });
+          }
+        }
+      }
+
+      // Si aucune règle spécifique dans la mémoire, appliquer la classification par nature d'opération SYSCOHADA
+      const syscohadaClassif = determineSyscohadaAccount(libelle, compteTiers, isAchat);
+      resolve({
+        matched: true,
+        auto_apply: true,
+        target_account: syscohadaClassif.target_account,
+        target_journal: syscohadaClassif.target_journal,
+        vat_rate: 19.25,
+        confidence_score: 0.90,
+        source: `Classification Nature SYSCOHADA (${syscohadaClassif.category})`
+      });
+    });
+  });
+}
+
+async function learnFromJournalData(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return 0;
+  
+  const stopWords = new Set(['fact', 'facture', 'n°', 'no', 'du', 'au', 'de', 'la', 'le', 'les', 'des', 'pour', 'par', 'virement', 'cheque', 'reglement', 'paiment', 'achat', 'vente', 'duplicata']);
+  const patternCounts = {};
+
+  entries.forEach(entry => {
+    const compte = String(entry.compte || entry.compte_comptable || '').trim();
+    const libelle = String(entry.libelle || entry.designation || '').trim();
+    const tiers = String(entry.compte_tiers || '').trim();
+    const codeJournal = String(entry.code_journal || entry.journal || '').trim();
+
+    if (!compte || (!libelle && !tiers)) return;
+
+    // Ne jamais apprendre un compte de tiers/trésorerie/capitaux (classes 1,4,5,9) comme "nature"
+    // de charge/produit : une écriture manuelle ou un journal brut contient toujours la ligne de
+    // contrepartie (401 Fournisseurs, 411 Clients, 52/57 Trésorerie...) à côté de la ligne de
+    // charge/produit réelle, et les deux partagent souvent le même libellé. Sans ce filtre, le
+    // moteur apprenait à imputer des factures directement sur le compte Fournisseurs (ex: "ETS",
+    // "sur" appris 355 fois vers 40100000 au lieu du compte de charge classe 6 attendu).
+    const classe = compte.charAt(0);
+    if (['1', '4', '5', '9'].includes(classe)) return;
+
+    // Extraire les mots clés principaux (longueur >= 3)
+    const tokens = `${libelle} ${tiers}`.split(/[\s,.;:\/\-\_\'\"]+/);
+    tokens.forEach(rawToken => {
+      const token = normalizeText(rawToken);
+      if (token.length >= 3 && !stopWords.has(token) && !/^\d+$/.test(token)) {
+        const key = `${token}|||${compte}|||${codeJournal}`;
+        patternCounts[key] = (patternCounts[key] || 0) + 1;
+      }
+    });
+  });
+
+  let learnedCount = 0;
+  for (const key in patternCounts) {
+    const count = patternCounts[key];
+    if (count >= 1) {
+      let [pattern, compte, codeJournal] = key.split('|||');
+
+      // Si le compte transmis est le compte générique 601100, affiner avec la classification SYSCOHADA par nature
+      if (compte === '601100') {
+        const sysClassif = determineSyscohadaAccount(pattern, '', true);
+        if (sysClassif.target_account !== '601100') {
+          compte = sysClassif.target_account;
+          if (sysClassif.target_journal) codeJournal = sysClassif.target_journal;
+        }
+      }
+
+      const confidence = Math.min(0.98, 0.70 + (count * 0.05));
+
+      await new Promise((res) => {
+        db.get("SELECT id, occurrences, confidence_score FROM business_rules WHERE pattern = ?", [pattern], (err, existing) => {
+          if (!err && existing) {
+            const newOcc = existing.occurrences + count;
+            const newConf = Math.min(0.98, Math.max(existing.confidence_score, 0.75 + (newOcc * 0.04)));
+            db.run("UPDATE business_rules SET occurrences = ?, confidence_score = ?, target_account = ?, target_journal = COALESCE(?, target_journal) WHERE id = ?", [newOcc, newConf, compte, codeJournal || null, existing.id], () => res());
+          } else {
+            db.run(
+              "INSERT INTO business_rules (pattern, condition_type, target_account, target_journal, confidence_score, auto_learned, occurrences, description) VALUES (?, 'contains', ?, ?, ?, 1, ?, ?)",
+              [pattern, compte, codeJournal || null, confidence, count, `Appris automatiquement depuis journal Excel (${count} écriture(s))`],
+              () => {
+                learnedCount++;
+                res();
+              }
+            );
+          }
+        });
+      });
+    }
+  }
+
+  return learnedCount;
+}
+
 async function askAI(prompt, history = []) {
   const settings = await getSettings();
+  const memoryContext = await getBusinessMemoryContext();
   
   if (settings.DEFAULT_AI === 'gemini' && settings.GEMINI_API_KEY) {
     const context = await getFinancialContext();
     const systemPrompt = `Tu es le DAF et Expert Comptable OHADA de l'entreprise. 
 Sois EXTRÊMEMENT direct et va droit au but.
+
+${memoryContext}
+
 Nos livres de comptes :
 - Tiers : ${JSON.stringify(context.tiers)}
 - Journal : ${JSON.stringify(context.journal)}
 
 Consignes :
-1. Fournis une réponse chirurgicale. Calcule ce qui est demandé.
+1. Fournis une réponse chirurgicale. Calcule ce qui est demandé. Applique scrupuleusement la Mémoire Métier si elle correspond.
 2. Utilise des tableaux Markdown.
 3. Une seule phrase de conclusion.`;
     
@@ -418,8 +714,25 @@ Tu DOIS impérativement répondre UNIQUEMENT avec un objet JSON valide ayant la 
     return JSON.parse(resultText);
   } catch (e) {
     console.error("Audit AI Error:", e);
-    return { analyse: "Erreur de l'IA: " + e.message, sql: null };
+    return { analyse: "Erreur de l'IA: " + friendlyAiErrorMessage(e), sql: null };
   }
 }
 
-module.exports = { askAI, askAuditAI, getSettings };
+// Les appels IA (Gemini/OpenAI/DeepSeek) sont la seule fonctionnalité de l'app qui a besoin
+// d'Internet ; sans cette détection, une coupure réseau remonte comme une erreur technique
+// brute (ENOTFOUND, fetch failed...) au lieu d'un message compréhensible par l'utilisateur.
+function isNetworkError(err) {
+  const code = err && err.code;
+  const msg = String((err && err.message) || '').toLowerCase();
+  const networkCodes = ['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'];
+  return networkCodes.includes(code) || msg.includes('fetch failed') || msg.includes('network');
+}
+
+function friendlyAiErrorMessage(err) {
+  if (isNetworkError(err)) {
+    return "Impossible de contacter le service IA : vérifiez votre connexion Internet (cette fonctionnalité est la seule à en avoir besoin).";
+  }
+  return err.message;
+}
+
+module.exports = { askAI, askAuditAI, getSettings, getBusinessMemoryContext, matchTransactionWithMemory, learnFromJournalData, determineSyscohadaAccount, friendlyAiErrorMessage };

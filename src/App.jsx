@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -10,6 +10,135 @@ import { SettingsModule } from './modules/SettingsModule';
 import { ImportModule } from './modules/ImportModule';
 import { ComptabiliteModule } from './modules/ComptabiliteModule';
 import { AuditModule } from './modules/AuditModule';
+import { MemoryModule } from './modules/MemoryModule';
+import { AnalyseFinanciereModule } from './modules/AnalyseFinanciereModule';
+
+// Sélecteur d'exercice comptable, visible en permanence dans le header : l'exercice actif est
+// une sélection globale côté serveur (voir server/index.js getActiveExercice), donc changer de
+// sélection ici ne fait que notifier le parent (qui force un remount des modules via `key`) —
+// aucune donnée d'exercice n'a besoin d'être transmise aux modules eux-mêmes.
+const ExerciceSelector = ({ onChange }) => {
+  const [exercices, setExercices] = useState([]);
+  const [active, setActive] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ libelle: '', date_debut: '', date_fin: '' });
+  const [error, setError] = useState('');
+
+  const load = async () => {
+    try {
+      const [listRes, activeRes] = await Promise.all([
+        fetch('/api/exercices').then(r => r.json()),
+        fetch('/api/exercices/active').then(r => r.json())
+      ]);
+      setExercices(Array.isArray(listRes) ? listRes : []);
+      setActive(activeRes || null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const select = async (id) => {
+    try {
+      await fetch('/api/exercices/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id || '' })
+      });
+      setOpen(false);
+      await load();
+      onChange && onChange(id || null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const createExercice = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (!form.libelle || !form.date_debut || !form.date_fin) {
+      setError('Tous les champs sont obligatoires.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/exercices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setForm({ libelle: '', date_debut: '', date_fin: '' });
+        setShowForm(false);
+        await select(data.id);
+      } else {
+        setError(data.error || 'Erreur lors de la création.');
+      }
+    } catch (e) {
+      setError('Connexion au serveur impossible.');
+    }
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        className="btn btn-secondary"
+        onClick={() => setOpen(o => !o)}
+        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+        title="Exercice comptable actif — filtre les états financiers, la Balance, le Grand Livre, les Tiers et le Dashboard"
+      >
+        <CalendarRange size={16} />
+        {active ? active.libelle : 'Tous les exercices'}
+        <ChevronDown size={14} />
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 0.5rem)', right: 0, zIndex: 100,
+          background: 'white', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-md)', minWidth: '260px', padding: '0.5rem'
+        }}>
+          <button
+            onClick={() => select(null)}
+            style={{ width: '100%', textAlign: 'left', padding: '0.5rem 0.75rem', background: !active ? 'rgba(59,130,246,0.1)' : 'transparent', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.85rem' }}
+          >
+            Tous les exercices (aucun filtre)
+          </button>
+          {exercices.map(ex => (
+            <button
+              key={ex.id}
+              onClick={() => select(ex.id)}
+              style={{ width: '100%', textAlign: 'left', padding: '0.5rem 0.75rem', background: active && active.id === ex.id ? 'rgba(59,130,246,0.1)' : 'transparent', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.85rem' }}
+            >
+              {ex.libelle} <span style={{ color: 'var(--color-text-muted)' }}>({ex.date_debut} → {ex.date_fin})</span>
+            </button>
+          ))}
+
+          <div style={{ borderTop: '1px solid var(--color-border)', marginTop: '0.5rem', paddingTop: '0.5rem' }}>
+            {!showForm ? (
+              <button
+                onClick={() => setShowForm(true)}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem 0.75rem', background: 'transparent', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--color-primary)', fontWeight: 500 }}
+              >
+                <Plus size={14} /> Nouvel exercice
+              </button>
+            ) : (
+              <form onSubmit={createExercice} style={{ padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <input className="input" placeholder="Libellé (ex: Exercice 2026)" value={form.libelle} onChange={e => setForm({ ...form, libelle: e.target.value })} style={{ padding: '0.4rem', fontSize: '0.8rem' }} />
+                <input className="input" type="date" value={form.date_debut} onChange={e => setForm({ ...form, date_debut: e.target.value })} style={{ padding: '0.4rem', fontSize: '0.8rem' }} />
+                <input className="input" type="date" value={form.date_fin} onChange={e => setForm({ ...form, date_fin: e.target.value })} style={{ padding: '0.4rem', fontSize: '0.8rem' }} />
+                {error && <span style={{ color: 'var(--color-error)', fontSize: '0.75rem' }}>{error}</span>}
+                <button type="submit" className="btn btn-primary" style={{ padding: '0.4rem', fontSize: '0.8rem' }}>Créer et sélectionner</button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 const ChatbotIA = () => {
   const [messages, setMessages] = useState([
@@ -38,7 +167,7 @@ const ChatbotIA = () => {
     setLoading(true);
 
     try {
-      const res = await fetch('http://localhost:3001/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -70,7 +199,7 @@ const ChatbotIA = () => {
 
   const handleApprove = async (index, sql) => {
     try {
-      const res = await fetch('http://localhost:3001/api/audit/apply', {
+      const res = await fetch('/api/audit/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql })
@@ -197,7 +326,7 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch('http://localhost:3001/api/dashboard/stats');
+        const res = await fetch('/api/dashboard/stats');
         const data = await res.json();
         setStats(data);
       } catch (err) {
@@ -284,18 +413,35 @@ const Dashboard = () => {
 
 function App() {
   const [activeModule, setActiveModule] = useState('ia');
+  const [activeExerciceId, setActiveExerciceId] = useState(null);
+  // État levé pour la navigation croisée entre modules (ex: un lien "Voir le Bilan" ou "Grand
+  // Livre" depuis la Fiscalité, qui doit arriver sur le bon onglet de Compta & États Financiers) —
+  // évite de dupliquer ces vues, chaque module reste la seule source de vérité pour son affichage.
+  const [comptaInitialTab, setComptaInitialTab] = useState(null);
+
+  const navigateTo = (moduleId, opts = {}) => {
+    if (opts.tab !== undefined) setComptaInitialTab(opts.tab);
+    setActiveModule(moduleId);
+  };
+
+  // Changer d'exercice ne fait pas redescendre de dates dans les modules : ils continuent
+  // d'appeler les mêmes routes qu'avant (déjà filtrées côté serveur). On force juste un
+  // remount du module actif via `key` pour qu'il relance son fetch initial.
+  const moduleKey = `${activeModule}-${activeExerciceId || 'all'}`;
 
   const renderContent = () => {
     switch (activeModule) {
-      case 'dashboard': return <Dashboard />;
-      case 'ia': return <ChatbotIA />;
-      case 'saisie': return <ComptabiliteModule />;
-      case 'tiers': return <TiersModule />;
-      case 'treso': return <TresoModule />;
-      case 'fiscalite': return <FiscaliteModule />;
-      case 'import': return <ImportModule />;
-      case 'audit': return <AuditModule />;
-      case 'settings': return <SettingsModule />;
+      case 'dashboard': return <Dashboard key={moduleKey} />;
+      case 'ia': return <ChatbotIA key={moduleKey} />;
+      case 'saisie': return <ComptabiliteModule key={moduleKey} initialTab={comptaInitialTab} />;
+      case 'tiers': return <TiersModule key={moduleKey} />;
+      case 'treso': return <TresoModule key={moduleKey} />;
+      case 'fiscalite': return <FiscaliteModule key={moduleKey} onNavigate={navigateTo} />;
+      case 'import': return <ImportModule key={moduleKey} />;
+      case 'audit': return <AuditModule key={moduleKey} />;
+      case 'memory': return <MemoryModule key={moduleKey} />;
+      case 'analyse': return <AnalyseFinanciereModule key={moduleKey} />;
+      case 'settings': return <SettingsModule key={moduleKey} />;
       default: return (
         <div className="card" style={{ padding: '3rem', textAlign: 'center' }}>
           <h2>Module en cours de développement</h2>
@@ -306,6 +452,8 @@ function App() {
 
   const navItems = [
     { id: 'ia', label: 'Cerveau IA (Chat)', icon: <MessageSquare className="nav-icon" /> },
+    { id: 'memory', label: 'Mémoire Métier (Brain)', icon: <BrainCircuit className="nav-icon" /> },
+    { id: 'analyse', label: 'Analyse Financière & KPIs', icon: <TrendingUp className="nav-icon" /> },
     { id: 'dashboard', label: 'Vue d\'ensemble', icon: <LayoutDashboard className="nav-icon" /> },
     { id: 'saisie', label: 'Compta & États Financiers', icon: <FileText className="nav-icon" /> },
     { id: 'tiers', label: 'Gestion des Tiers', icon: <Users className="nav-icon" /> },
@@ -356,11 +504,13 @@ function App() {
           </div>
           
           <div className="header-actions">
+            <ExerciceSelector onChange={setActiveExerciceId} />
+
             <div className="search-bar" style={{ position: 'relative' }}>
               <Search size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
               <input type="text" className="input" placeholder="Rechercher une écriture..." style={{ paddingLeft: '2.75rem', width: '300px' }} />
             </div>
-            
+
             <button className="btn btn-secondary" style={{ padding: '0.6rem', borderRadius: '50%' }}>
               <Bell size={20} />
             </button>
