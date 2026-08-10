@@ -531,7 +531,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.map((row, idx) => {
+                  {(Array.isArray(data) ? data : []).map((row, idx) => {
                     const isEditing = editingRowId === row.id;
                     const isHighlighted = highlightRowId === row.id;
                     return (
@@ -706,7 +706,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         let gestion_debit = 0, gestion_credit = 0;
         let grand_debit = 0, grand_credit = 0;
 
-        data.forEach(row => {
+        (Array.isArray(data) ? data : []).forEach(row => {
           const compteStr = String(row.compte);
           const root = compteStr.substring(0, 2);
           if (!groups[root]) {
@@ -837,8 +837,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
       }
 
       case 'bilan': {
-        const a = data.actif || {};
-        const p = data.passif || {};
+        const a = data?.actif || {};
+        const p = data?.passif || {};
         const actifRows = [
           { label: 'Immobilisations brutes', value: a.immobilisationsBrutes || 0 },
           { label: 'Amortissements', value: -(a.amortissements || 0) },
