@@ -5,6 +5,7 @@ const xlsx = require('xlsx');
 const { PDFParse } = require('pdf-parse');
 const db = require('./db');
 const { askAI, matchTransactionWithMemory, learnFromJournalData, friendlyAiErrorMessage } = require('./ai');
+const { computeEtatsFinanciers } = require('./ohadaRules');
 
 const path = require('path');
 const fs = require('fs');
@@ -1017,106 +1018,49 @@ app.get('/api/dashboard/stats', async (req, res) => {
   }
 });
 
-// Classification unique par nature de compte (débiteur/créditeur), partagée par /api/bilan,
-// /api/resultat et /api/financial-analysis : ces trois routes affichaient chacune un "résultat net"
-// calculé différemment à partir des mêmes données. En centralisant le calcul ici, elles ne peuvent
-// plus diverger. Le résultat net est aussi injecté au passif (poste 13) pour que le bilan s'équilibre
-// réellement (Total Actif = Total Passif), au lieu du pliage par signe de classe entière qui ignorait
-// la distinction immobilisations/amortissements et mélangeait créances et dettes de la classe 4.
+// Classification des comptes selon les règles métiers SYSCOHADA (server/ohadaRules.js),
+// partagée par /api/bilan, /api/resultat et /api/financial-analysis : ces trois routes
+// affichaient auparavant chacune un "résultat net" calculé différemment à partir des mêmes
+// données. En centralisant le calcul dans un seul moteur, elles ne peuvent plus diverger, et
+// aucun compte n'est plus ignoré silencieusement selon son préfixe (voir comptesNonClasses).
+// Le résultat net calculé depuis les comptes de gestion (classes 6/7/8) est injecté dans les
+// capitaux propres du bilan plutôt que d'utiliser le solde du compte 13 (qui ne porte le résultat
+// qu'après une écriture de clôture), pour que le bilan s'équilibre réellement en cours d'exercice.
 function computeFinancials(rows) {
-  let capitauxPropres = 0;
-  let immobilisationsBrutes = 0;
-  let amortissements = 0;
-  let stocks = 0;
-  let creancesClients = 0;
-  let dettesFournisseurs = 0;
-  let autresCreances = 0;
-  let autresDettes = 0;
-  let tresorerieActif = 0;
-  let tresoreriePassif = 0;
+  const { bilan, resultat, comptesNonClasses } = computeEtatsFinanciers(rows);
+  const { actif, passif } = bilan;
 
-  let ca = 0;
-  let autresProduits = 0;
-  let produitsHAO = 0;
-  let achats = 0;
-  let servicesExterieurs = 0;
-  let chargesPersonnel = 0;
-  let dotationsAmort = 0;
-  let autresCharges = 0;
-  let chargesHAO = 0;
-
-  (rows || []).forEach(r => {
-    const compte = String(r.compte || '');
-    const deb = r.total_debit || 0;
-    const cred = r.total_credit || 0;
-    const netDeb = deb - cred;
-    const netCred = cred - deb;
-
-    if (compte.startsWith('28')) { amortissements += netCred > 0 ? netCred : 0; }
-    else if (compte.startsWith('1')) { capitauxPropres += netCred > 0 ? netCred : 0; }
-    else if (compte.startsWith('2')) { immobilisationsBrutes += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('3')) { stocks += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('411')) {
-      // Un compte client peut aussi finir créditeur (avance reçue) : le solde doit toujours
-      // atterrir quelque part, jamais être ignoré selon son signe, sous peine de déséquilibrer le bilan.
-      if (netDeb > 0) creancesClients += netDeb;
-      if (netCred > 0) autresDettes += netCred;
-    }
-    else if (compte.startsWith('401')) {
-      // Symétrique : un compte fournisseur peut finir débiteur (acompte versé) = une créance.
-      if (netCred > 0) dettesFournisseurs += netCred;
-      if (netDeb > 0) autresCreances += netDeb;
-    }
-    else if (['40', '41', '42', '43', '44', '46', '48'].some(p => compte.startsWith(p))) {
-      // Reste des comptes de tiers (hors 401/411 déjà isolés) : chaque compte est classé
-      // selon SA propre nature, jamais en nettant toute la classe 4 par un seul signe global.
-      if (netDeb > 0) autresCreances += netDeb;
-      if (netCred > 0) autresDettes += netCred;
-    }
-    else if (compte.startsWith('56')) { tresoreriePassif += netCred > 0 ? netCred : 0; }
-    else if (['52', '53', '54', '57', '58'].some(p => compte.startsWith(p))) {
-      // Une caisse/banque peut finir créditrice (découvert) : à traiter comme du passif de
-      // trésorerie plutôt que de disparaître du bilan.
-      if (netDeb > 0) tresorerieActif += netDeb;
-      if (netCred > 0) tresoreriePassif += netCred;
-    }
-    else if (compte.startsWith('70')) { ca += netCred > 0 ? netCred : 0; }
-    else if (compte.startsWith('81') || compte.startsWith('83') || compte.startsWith('89')) { chargesHAO += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('82') || compte.startsWith('84')) { produitsHAO += netCred > 0 ? netCred : 0; }
-    else if (compte.startsWith('7')) { autresProduits += netCred > 0 ? netCred : 0; }
-    else if (compte.startsWith('60')) { achats += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('61') || compte.startsWith('62') || compte.startsWith('63')) { servicesExterieurs += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('66')) { chargesPersonnel += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('68')) { dotationsAmort += netDeb > 0 ? netDeb : 0; }
-    else if (compte.startsWith('6')) { autresCharges += netDeb > 0 ? netDeb : 0; }
-  });
-
-  const immobilisationsNettes = immobilisationsBrutes - amortissements;
-  const actifCirculant = stocks + creancesClients + autresCreances;
-  const passifCirculant = dettesFournisseurs + autresDettes;
-
-  const totalProduits = ca + autresProduits + produitsHAO;
-  const totalCharges = achats + servicesExterieurs + chargesPersonnel + dotationsAmort + autresCharges + chargesHAO;
-  const resultatNet = totalProduits - totalCharges;
-
-  const margeBrute = ca - achats;
-  const valeurAjoutee = margeBrute - servicesExterieurs;
-  const ebe = valeurAjoutee - chargesPersonnel;
-  const resultatExploitation = ebe - dotationsAmort;
-
-  const totalActif = immobilisationsNettes + actifCirculant + tresorerieActif;
-  const totalPassif = capitauxPropres + resultatNet + passifCirculant + tresoreriePassif;
-
+  // Agrégats "à plat" conservés pour la compatibilité de /api/financial-analysis (ratios,
+  // ancien tracé simplifié) — dérivés de la structure conforme ci-dessus, jamais recalculés
+  // séparément.
   return {
-    capitauxPropres, immobilisationsBrutes, amortissements, immobilisationsNettes,
-    stocks, creancesClients, dettesFournisseurs, autresCreances, autresDettes,
-    tresorerieActif, tresoreriePassif, actifCirculant, passifCirculant, totalActif, totalPassif,
-    ca, autresProduits, produitsHAO, achats, servicesExterieurs, chargesPersonnel,
-    dotationsAmort, autresCharges, chargesHAO, totalProduits, totalCharges, resultatNet,
-    margeBrute, valeurAjoutee, ebe, resultatExploitation,
-    frng: (capitauxPropres + resultatNet) - immobilisationsNettes,
-    bfr: actifCirculant - passifCirculant,
-    tresorerieNette: tresorerieActif - tresoreriePassif
+    bilan, resultat, comptesNonClasses,
+    capitauxPropres: passif.totalCapitauxPropres,
+    immobilisationsNettes: actif.totalImmobilisationsNettes,
+    stocks: actif.stocks.net,
+    creancesClients: actif.creancesClients.net,
+    dettesFournisseurs: passif.dettesFournisseurs,
+    autresCreances: actif.autresCreances,
+    autresDettes: passif.autresDettes,
+    tresorerieActif: actif.tresorerieActif,
+    tresoreriePassif: passif.tresoreriePassif,
+    actifCirculant: actif.totalActifCirculant,
+    passifCirculant: passif.totalPassifCirculant,
+    totalActif: actif.totalActif,
+    totalPassif: passif.totalPassif,
+    ca: resultat.chiffreAffaires,
+    achats: resultat.achatsConsommes,
+    servicesExterieurs: resultat.consommationsExternes,
+    chargesPersonnel: resultat.chargesPersonnel,
+    dotationsAmort: resultat.dotationsExploitation,
+    resultatNet: resultat.resultatNet,
+    margeBrute: resultat.chiffreAffaires - resultat.achatsConsommes,
+    valeurAjoutee: resultat.valeurAjoutee,
+    ebe: resultat.excedentBrutExploitation,
+    resultatExploitation: resultat.resultatExploitation,
+    frng: passif.totalRessourcesStables - actif.totalImmobilisationsNettes,
+    bfr: actif.totalActifCirculant - passif.totalPassifCirculant,
+    tresorerieNette: actif.tresorerieActif - passif.tresoreriePassif,
   };
 }
 
@@ -1217,29 +1161,8 @@ app.get('/api/balance', async (req, res) => {
 app.get('/api/bilan', async (req, res) => {
   try {
     const rows = await getFinancialRows();
-    const fin = computeFinancials(rows);
-    res.json({
-      actif: {
-        immobilisationsBrutes: fin.immobilisationsBrutes,
-        amortissements: fin.amortissements,
-        immobilisationsNettes: fin.immobilisationsNettes,
-        stocks: fin.stocks,
-        creancesClients: fin.creancesClients,
-        autresCreances: fin.autresCreances,
-        actifCirculant: fin.actifCirculant,
-        tresorerieActif: fin.tresorerieActif,
-        total: fin.totalActif
-      },
-      passif: {
-        capitauxPropres: fin.capitauxPropres,
-        resultatNet: fin.resultatNet,
-        dettesFournisseurs: fin.dettesFournisseurs,
-        autresDettes: fin.autresDettes,
-        passifCirculant: fin.passifCirculant,
-        tresoreriePassif: fin.tresoreriePassif,
-        total: fin.totalPassif
-      }
-    });
+    const { bilan, comptesNonClasses } = computeEtatsFinanciers(rows);
+    res.json({ ...bilan, comptesNonClasses });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1248,25 +1171,8 @@ app.get('/api/bilan', async (req, res) => {
 app.get('/api/resultat', async (req, res) => {
   try {
     const rows = await getFinancialRows();
-    const fin = computeFinancials(rows);
-    res.json({
-      ca: fin.ca,
-      autresProduits: fin.autresProduits,
-      produitsHAO: fin.produitsHAO,
-      totalProduits: fin.totalProduits,
-      achats: fin.achats,
-      servicesExterieurs: fin.servicesExterieurs,
-      chargesPersonnel: fin.chargesPersonnel,
-      dotationsAmort: fin.dotationsAmort,
-      autresCharges: fin.autresCharges,
-      chargesHAO: fin.chargesHAO,
-      totalCharges: fin.totalCharges,
-      margeBrute: fin.margeBrute,
-      valeurAjoutee: fin.valeurAjoutee,
-      ebe: fin.ebe,
-      resultatExploitation: fin.resultatExploitation,
-      resultatNet: fin.resultatNet
-    });
+    const { resultat, comptesNonClasses } = computeEtatsFinanciers(rows);
+    res.json({ ...resultat, comptesNonClasses });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -376,6 +376,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                         className="input"
                         style={{ padding: '0.5rem' }}
                         placeholder="N° Compte *"
+                        list="chart-of-accounts-list"
                         value={line.compte}
                         onChange={e => updateLine(idx, { compte: e.target.value })}
                       />
@@ -558,7 +559,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                               <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.reference} onChange={e => setEditRowForm({ ...editRowForm, reference: e.target.value })} />
                             </td>
                             <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.compte} onChange={e => setEditRowForm({ ...editRowForm, compte: e.target.value })} />
+                              <input className="input" style={{ padding: '0.35rem', width: '90px' }} list="chart-of-accounts-list" value={editRowForm.compte} onChange={e => setEditRowForm({ ...editRowForm, compte: e.target.value })} />
                             </td>
                             <td style={{ padding: '0.4rem 0.5rem' }}>
                               <input className="input" style={{ padding: '0.35rem', width: '110px' }} value={editRowForm.compte_tiers} onChange={e => setEditRowForm({ ...editRowForm, compte_tiers: e.target.value })} />
@@ -837,40 +838,72 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
       }
 
       case 'bilan': {
+        // Structure conforme au Guide d'application SYSCOHADA (voir server/ohadaRules.js) :
+        // immobilisations nettes des amortissements ET des dépréciations, capitaux propres
+        // distincts des dettes financières (16-18) et des provisions pour risques (19).
         const a = data?.actif || {};
         const p = data?.passif || {};
+        const immoIncorp = a.immobilisationsIncorporelles || {};
+        const immoCorp = a.immobilisationsCorporelles || {};
+        const immoFin = a.immobilisationsFinancieres || {};
+        const stocks = a.stocks || {};
+        const creances = a.creancesClients || {};
+
         const actifRows = [
-          { label: 'Immobilisations brutes', value: a.immobilisationsBrutes || 0 },
-          { label: 'Amortissements', value: -(a.amortissements || 0) },
-          { label: 'Stocks', value: a.stocks || 0 },
-          { label: 'Créances clients', value: a.creancesClients || 0 },
+          { label: 'Immobilisations incorporelles (brut)', value: immoIncorp.brut || 0 },
+          { label: 'Immobilisations corporelles (brut)', value: immoCorp.brut || 0 },
+          { label: 'Immobilisations financières (brut)', value: immoFin.brut || 0 },
+          { label: 'Amortissements', value: -((immoCorp.amortissements || 0)), negative: true },
+          { label: 'Dépréciations sur immobilisations', value: -((immoIncorp.depreciations || 0) + (immoCorp.depreciations || 0) + (immoFin.depreciations || 0)), negative: true },
+          { label: 'Immobilisations nettes', value: a.totalImmobilisationsNettes || 0, subtotal: true },
+          { label: 'Stocks (brut)', value: stocks.brut || 0 },
+          { label: 'Dépréciations sur stocks', value: -(stocks.depreciations || 0), negative: true },
+          { label: 'Créances clients (brut)', value: creances.brut || 0 },
+          { label: 'Dépréciations sur créances', value: -(creances.depreciations || 0), negative: true },
           { label: 'Autres créances', value: a.autresCreances || 0 },
+          { label: 'Total actif circulant', value: a.totalActifCirculant || 0, subtotal: true },
           { label: 'Trésorerie', value: a.tresorerieActif || 0 },
+          ...(a.ecartConversionActif ? [{ label: 'Écart de conversion actif', value: a.ecartConversionActif }] : []),
         ];
         const passifRows = [
-          { label: 'Capitaux propres', value: p.capitauxPropres || 0 },
-          { label: "Résultat net de l'exercice", value: p.resultatNet || 0 },
+          { label: 'Capital', value: p.capital || 0 },
+          { label: 'Réserves', value: p.reserves || 0 },
+          { label: 'Report à nouveau', value: p.reportANouveau || 0 },
+          { label: "Résultat net de l'exercice", value: p.resultatNetExercice || 0 },
+          { label: "Subventions d'investissement", value: p.subventionsInvestissement || 0 },
+          { label: 'Provisions réglementées', value: p.provisionsReglementees || 0 },
+          { label: 'Total capitaux propres', value: p.totalCapitauxPropres || 0, subtotal: true },
+          { label: 'Dettes financières', value: p.dettesFinancieres || 0 },
+          { label: 'Provisions pour risques et charges', value: p.provisionsRisquesCharges || 0 },
+          { label: 'Total ressources stables', value: p.totalRessourcesStables || 0, subtotal: true },
           { label: 'Dettes fournisseurs', value: p.dettesFournisseurs || 0 },
           { label: 'Autres dettes', value: p.autresDettes || 0 },
+          { label: 'Total passif circulant', value: p.totalPassifCirculant || 0, subtotal: true },
           { label: 'Trésorerie passif', value: p.tresoreriePassif || 0 },
+          ...(p.ecartConversionPassif ? [{ label: 'Écart de conversion passif', value: p.ecartConversionPassif }] : []),
         ];
-        const totalActif = a.total || 0;
-        const totalPassif = p.total || 0;
+        const totalActif = a.totalActif || 0;
+        const totalPassif = p.totalPassif || 0;
         const equilibre = Math.abs(totalActif - totalPassif) < 1;
+        const nonClasses = data?.comptesNonClasses || [];
+
+        const renderRow = (row, idx) => (
+          <tr key={idx} style={row.subtotal
+            ? { borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)', fontWeight: 600, background: 'rgba(0,0,0,0.02)' }
+            : { borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+            <td style={{ padding: '0.6rem 0', paddingLeft: row.subtotal ? 0 : '0.5rem', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>{row.label}</td>
+            <td style={{ textAlign: 'right', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>{row.value.toLocaleString()} FCFA</td>
+          </tr>
+        );
 
         return (
           <div>
-            <div style={{ display: 'flex', gap: '2rem' }}>
-              <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: '320px' }}>
                 <h4 style={{ marginBottom: '1rem', color: 'var(--color-primary)' }}>ACTIF (Emplois)</h4>
-                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.9rem' }}>
                   <tbody>
-                    {actifRows.map((row, idx) => (
-                      <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
-                        <td style={{ padding: '0.75rem 0' }}>{row.label}</td>
-                        <td style={{ textAlign: 'right' }}>{row.value.toLocaleString()} FCFA</td>
-                      </tr>
-                    ))}
+                    {actifRows.map(renderRow)}
                     <tr style={{ fontWeight: 'bold', borderTop: '2px solid var(--color-border)' }}>
                       <td style={{ padding: '1rem 0' }}>TOTAL ACTIF</td>
                       <td style={{ textAlign: 'right' }}>{totalActif.toLocaleString()} FCFA</td>
@@ -878,16 +911,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                   </tbody>
                 </table>
               </div>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: '320px' }}>
                 <h4 style={{ marginBottom: '1rem', color: 'var(--color-primary-dark)' }}>PASSIF (Ressources)</h4>
-                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.9rem' }}>
                   <tbody>
-                    {passifRows.map((row, idx) => (
-                      <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
-                        <td style={{ padding: '0.75rem 0' }}>{row.label}</td>
-                        <td style={{ textAlign: 'right' }}>{row.value.toLocaleString()} FCFA</td>
-                      </tr>
-                    ))}
+                    {passifRows.map(renderRow)}
                     <tr style={{ fontWeight: 'bold', borderTop: '2px solid var(--color-border)' }}>
                       <td style={{ padding: '1rem 0' }}>TOTAL PASSIF</td>
                       <td style={{ textAlign: 'right' }}>{totalPassif.toLocaleString()} FCFA</td>
@@ -903,30 +931,47 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
             }}>
               {equilibre ? 'Bilan équilibré (Actif = Passif)' : `Bilan déséquilibré : écart de ${Math.abs(totalActif - totalPassif).toLocaleString()} FCFA`}
             </div>
+            {nonClasses.length > 0 && (
+              <div style={{ marginTop: '0.75rem', padding: '0.75rem', borderRadius: 'var(--radius-md)', background: 'rgba(245, 158, 11, 0.1)', color: '#92400e', fontSize: '0.85rem' }}>
+                {nonClasses.length} compte(s) non reconnu(s) par le plan comptable SYSCOHADA, donc absent(s) du bilan ci-dessus : {nonClasses.join(', ')}
+              </div>
+            )}
           </div>
         );
       }
 
       case 'resultat': {
+        // Cascade conforme au Guide d'application SYSCOHADA, Partie 3 §3.2 (voir server/ohadaRules.js) :
+        // marge commerciale -> CA -> valeur ajoutée -> EBE -> résultat d'exploitation -> résultat
+        // financier -> résultat des activités ordinaires -> résultat H.A.O. -> résultat net (après
+        // participation des travailleurs et impôts sur le résultat, comptes 87 et 89).
         const r = data || {};
         const rows = [
-          { label: "Chiffre d'affaires", value: r.ca || 0 },
-          { label: 'Achats', value: -(r.achats || 0) },
-          { label: 'Marge brute', value: r.margeBrute || 0, strong: true },
-          { label: 'Services extérieurs', value: -(r.servicesExterieurs || 0) },
+          { label: 'Marge commerciale', value: r.margeCommerciale || 0, strong: true },
+          { label: "Chiffre d'affaires", value: r.chiffreAffaires || 0 },
+          { label: "Autres produits d'exploitation", value: r.autresProduitsExploitation || 0 },
+          { label: 'Achats consommés', value: -(r.achatsConsommes || 0) },
+          { label: 'Consommations externes', value: -(r.consommationsExternes || 0) },
           { label: 'Valeur ajoutée', value: r.valeurAjoutee || 0, strong: true },
           { label: 'Charges de personnel', value: -(r.chargesPersonnel || 0) },
-          { label: "Excédent brut d'exploitation (EBE)", value: r.ebe || 0, strong: true },
-          { label: 'Dotations aux amortissements', value: -(r.dotationsAmort || 0) },
+          { label: "Excédent brut d'exploitation (EBE)", value: r.excedentBrutExploitation || 0, strong: true },
+          { label: "Dotations d'exploitation (amortissements, dépréciations)", value: -(r.dotationsExploitation || 0) },
+          { label: "Reprises d'exploitation", value: r.reprisesExploitation || 0 },
           { label: "Résultat d'exploitation", value: r.resultatExploitation || 0, strong: true },
-          { label: 'Autres produits', value: r.autresProduits || 0 },
-          { label: 'Autres charges', value: -(r.autresCharges || 0) },
+          { label: 'Produits financiers', value: r.produitsFinanciers || 0 },
+          { label: 'Charges financières', value: -(r.chargesFinancieres || 0) },
+          { label: 'Résultat financier', value: r.resultatFinancier || 0, strong: true },
+          { label: 'Résultat des activités ordinaires', value: r.resultatActivitesOrdinaires || 0, strong: true },
           ...(r.produitsHAO || r.chargesHAO ? [
-            { label: 'Produits HAO', value: r.produitsHAO || 0 },
-            { label: 'Charges HAO', value: -(r.chargesHAO || 0) },
+            { label: 'Produits H.A.O.', value: r.produitsHAO || 0 },
+            { label: 'Charges H.A.O.', value: -(r.chargesHAO || 0) },
+            { label: 'Résultat H.A.O.', value: r.resultatHAO || 0, strong: true },
           ] : []),
+          ...(r.participationTravailleurs ? [{ label: 'Participation des travailleurs', value: -(r.participationTravailleurs || 0) }] : []),
+          { label: 'Impôts sur le résultat', value: -(r.impotsResultat || 0) },
         ];
         const resultatNet = r.resultatNet || 0;
+        const nonClasses = r.comptesNonClasses || [];
 
         return (
           <div style={{ maxWidth: '600px', margin: '0 auto' }}>
@@ -943,6 +988,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                 {resultatNet.toLocaleString()} FCFA
               </span>
             </div>
+            {nonClasses.length > 0 && (
+              <div style={{ marginTop: '0.75rem', padding: '0.75rem', borderRadius: 'var(--radius-md)', background: 'rgba(245, 158, 11, 0.1)', color: '#92400e', fontSize: '0.85rem' }}>
+                {nonClasses.length} compte(s) non reconnu(s) par le plan comptable SYSCOHADA, donc absent(s) du résultat ci-dessus : {nonClasses.join(', ')}
+              </div>
+            )}
           </div>
         );
       }
@@ -964,6 +1014,17 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         <button className={`btn ${activeTab === 'bilan' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('bilan')}>Bilan</button>
         <button className={`btn ${activeTab === 'resultat' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('resultat')}>Compte de Résultat</button>
       </div>
+
+      {/* Suggestions issues du plan comptable de l'entreprise chargé en mémoire (voir
+          /api/chart-of-accounts) : la saisie reste libre, mais propose en priorité les comptes
+          réellement utilisés par l'entité plutôt qu'une liste OHADA générique. Défini une seule
+          fois ici (plutôt que dans un onglet précis) pour rester disponible quel que soit l'onglet
+          actif, y compris l'édition inline du Journal. */}
+      <datalist id="chart-of-accounts-list">
+        {Object.entries(customAccounts).map(([compte, libelle]) => (
+          <option key={compte} value={compte}>{compte} — {libelle}</option>
+        ))}
+      </datalist>
 
       <div style={{ minHeight: '400px' }}>
         {renderContent()}
