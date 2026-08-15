@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -140,13 +140,89 @@ const ExerciceSelector = ({ onChange }) => {
   );
 };
 
+const SyncHeaderStatus = ({ onClickSettings }) => {
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    const check = () => {
+      fetch('/api/sync/status')
+        .then(r => r.json())
+        .then(d => setStatus(d))
+        .catch(e => console.error(e));
+    };
+    check();
+    const interval = setInterval(check, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!status) return null;
+
+  if (!status.autoSync) {
+    return (
+      <div 
+        onClick={onClickSettings}
+        style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.35rem 0.75rem', borderRadius: '12px', background: '#f1f5f9', border: '1px solid #cbd5e1', fontSize: '0.75rem', fontWeight: 600, color: '#475569', cursor: 'pointer' }}
+        title="La synchronisation automatique est désactivée. Cliquez pour ouvrir les Paramètres."
+      >
+        🔒 Mode 100% Local
+      </div>
+    );
+  }
+
+  if (!status.url || !status.hasKey) {
+    return (
+      <div 
+        onClick={onClickSettings}
+        style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.35rem 0.75rem', borderRadius: '12px', background: '#fffbe5', border: '1px solid #fef3c7', fontSize: '0.75rem', fontWeight: 600, color: '#b45309', cursor: 'pointer' }}
+        title="Supabase non configuré. Cliquez pour paramétrer."
+      >
+        ⚠️ Supabase non configuré
+      </div>
+    );
+  }
+
+  const isPending = status.pendingCount > 0;
+  return (
+    <div 
+      onClick={onClickSettings}
+      style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.35rem 0.75rem', borderRadius: '12px', background: isPending ? '#fff7ed' : '#f0fdf4', border: `1px solid ${isPending ? '#ffedd5' : '#bbf7d0'}`, fontSize: '0.75rem', fontWeight: 600, color: isPending ? '#c2410c' : '#15803d', cursor: 'pointer' }}
+      title={isPending ? `${status.pendingCount} écriture(s) locale(s) en attente de synchronisation` : 'Données locales entièrement synchronisées avec Supabase'}
+    >
+      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: isPending ? '#f97316' : '#22c55e', display: 'inline-block' }}></span>
+      {isPending ? `🔴 ${status.pendingCount} en attente` : '🟢 Synchronisé avec Supabase'}
+    </div>
+  );
+};
+
+const defaultWelcomeMessage = [
+  { role: 'assistant', text: "Bonjour ! Je suis votre Agent Comptable OHADA 🤖.\n\nJe suis prêt à analyser vos comptes, lettrer vos factures, rapprocher vos banques et préparer vos déclarations fiscales. Que souhaitez-vous faire aujourd'hui ?" }
+];
+
 const ChatbotIA = () => {
-  const [messages, setMessages] = useState([
-    { role: 'assistant', text: "Bonjour ! Je suis votre Agent Comptable OHADA 🤖.\n\nJe suis prêt à analyser vos comptes, lettrer vos factures, rapprocher vos banques et préparer vos déclarations fiscales. Que souhaitez-vous faire aujourd'hui ?" }
-  ]);
+  const [messages, setMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem('agent_ohada_chat_history');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      console.error("Error reading chat history:", e);
+    }
+    return defaultWelcomeMessage;
+  });
+
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('agent_ohada_chat_history', JSON.stringify(messages));
+    } catch (e) {
+      console.error("Error saving chat history:", e);
+    }
+  }, [messages]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -155,6 +231,15 @@ const ChatbotIA = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  const handleResetChat = () => {
+    if (window.confirm("Voulez-vous réinitialiser la discussion et démarrer une nouvelle conversation ?")) {
+      setMessages(defaultWelcomeMessage);
+      try {
+        localStorage.removeItem('agent_ohada_chat_history');
+      } catch (e) {}
+    }
+  };
 
   const handleSend = async () => {
     if (!input.trim()) return;
@@ -221,6 +306,23 @@ const ChatbotIA = () => {
 
   return (
     <div className="card" style={{ height: 'calc(100vh - 150px)', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
+      {/* Top Header Bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.85rem 1.25rem', background: '#f8fafc', borderBottom: '1px solid var(--color-border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, color: 'var(--color-primary-dark)', fontSize: '0.95rem' }}>
+          <BrainCircuit size={20} color="var(--color-primary)" />
+          Cerveau IA - Assistant Comptable OHADA
+        </div>
+
+        <button
+          className="btn btn-secondary"
+          onClick={handleResetChat}
+          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', background: '#ffffff', borderColor: '#cbd5e1', color: 'var(--color-text-main)', fontWeight: 600 }}
+          title="Effacer la discussion en cours et démarrer une nouvelle conversation"
+        >
+          <RotateCcw size={14} /> 🔄 Nouvelle Discussion
+        </button>
+      </div>
+
       <div style={{ flex: 1, padding: '1.5rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
         {messages.map((msg, idx) => (
           <div key={idx} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
@@ -432,7 +534,7 @@ function App() {
   const renderContent = () => {
     switch (activeModule) {
       case 'dashboard': return <Dashboard key={moduleKey} />;
-      case 'ia': return <ChatbotIA key={moduleKey} />;
+      case 'ia': return <ChatbotIA />;
       case 'saisie': return <ComptabiliteModule key={moduleKey} initialTab={comptaInitialTab} />;
       case 'tiers': return <TiersModule key={moduleKey} />;
       case 'treso': return <TresoModule key={moduleKey} />;
@@ -505,6 +607,7 @@ function App() {
           
           <div className="header-actions">
             <ExerciceSelector onChange={setActiveExerciceId} />
+            <SyncHeaderStatus onClickSettings={() => setActiveModule('settings')} />
 
             <div className="search-bar" style={{ position: 'relative' }}>
               <Search size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />

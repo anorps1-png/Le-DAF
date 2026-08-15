@@ -107,6 +107,93 @@ const db = new sqlite3.Database(dbPath, (err) => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`);
 
+      // Table des informations d'en-tête d'entreprise (Page de garde DSF)
+      db.run(`CREATE TABLE IF NOT EXISTS company_info (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )`);
+
+      // Table des logs de synchronisation Supabase
+      db.run(`CREATE TABLE IF NOT EXISTS sync_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        status TEXT,
+        pushed_count INTEGER DEFAULT 0,
+        pulled_count INTEGER DEFAULT 0,
+        message TEXT
+      )`);
+
+      // Table du rapprochement bancaire
+      db.run(`CREATE TABLE IF NOT EXISTS rapprochement_bancaire (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date_operation TEXT NOT NULL,
+        libelle TEXT NOT NULL,
+        debit REAL DEFAULT 0,
+        credit REAL DEFAULT 0,
+        journal_id INTEGER,
+        statut_matching TEXT DEFAULT 'non_rapproche',
+        date_matching DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+
+      // Table du suivi des relances clients / fournisseurs
+      db.run(`CREATE TABLE IF NOT EXISTS relances_tiers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tiers_id INTEGER,
+        n_facture TEXT,
+        niveau_relance INTEGER DEFAULT 1,
+        date_relance TEXT,
+        methode TEXT DEFAULT 'email',
+        notes TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+
+      // Migration dynamique des colonnes de suivi avancé sur la table journal (Lettrage, Échéance, Paiement, Validations, TVA, Analytique, Pièce jointe)
+      db.all(`PRAGMA table_info(journal)`, (err, columns) => {
+        if (!err && Array.isArray(columns)) {
+          const colNames = columns.map(c => c.name);
+          const journalCols = [
+            { name: 'statut_lettrage', type: "TEXT DEFAULT 'non_lettre'" },
+            { name: 'code_lettrage', type: 'TEXT' },
+            { name: 'date_lettrage', type: 'DATETIME' },
+            { name: 'auteur_lettrage', type: 'TEXT' },
+            { name: 'date_echeance', type: 'TEXT' },
+            { name: 'date_reglement', type: 'TEXT' },
+            { name: 'mode_paiement', type: 'TEXT' },
+            { name: 'reference_banque', type: 'TEXT' },
+            { name: 'statut_validation', type: "TEXT DEFAULT 'valide'" },
+            { name: 'validateur', type: 'TEXT' },
+            { name: 'date_validation', type: 'DATETIME' },
+            { name: 'motif_rejet', type: 'TEXT' },
+            { name: 'centre_de_cout', type: 'TEXT' },
+            { name: 'tva_taux', type: 'REAL DEFAULT 0' },
+            { name: 'tva_montant', type: 'REAL DEFAULT 0' },
+            { name: 'piece_jointe', type: 'TEXT' }
+          ];
+
+          journalCols.forEach(col => {
+            if (!colNames.includes(col.name)) {
+              db.run(`ALTER TABLE journal ADD COLUMN ${col.name} ${col.type}`, () => {});
+            }
+          });
+        }
+      });
+
+      // Alter tables to add updated_at and synced_at tracking columns for Supabase sync
+      ['journal', 'tiers', 'exercices', 'chart_of_accounts', 'business_rules'].forEach(tbl => {
+        db.all(`PRAGMA table_info(${tbl})`, (err, columns) => {
+          if (!err && Array.isArray(columns)) {
+            const colNames = columns.map(c => c.name);
+            if (!colNames.includes('updated_at')) {
+              db.run(`ALTER TABLE ${tbl} ADD COLUMN updated_at DATETIME`, () => {});
+            }
+            if (!colNames.includes('synced_at')) {
+              db.run(`ALTER TABLE ${tbl} ADD COLUMN synced_at DATETIME`, () => {});
+            }
+          }
+        });
+      });
+
       // Insert default settings if empty
       db.get("SELECT COUNT(*) as count FROM settings", (err, row) => {
         if (!err && row.count === 0) {
@@ -116,11 +203,17 @@ const db = new sqlite3.Database(dbPath, (err) => {
           db.run("INSERT INTO settings (key, value) VALUES ('DEFAULT_AI', 'gemini')");
           db.run("INSERT INTO settings (key, value) VALUES ('OPENAI_BASE_URL', '')");
           db.run("INSERT INTO settings (key, value) VALUES ('OPENAI_MODEL', '')");
+          db.run("INSERT INTO settings (key, value) VALUES ('SUPABASE_URL', '')");
+          db.run("INSERT INTO settings (key, value) VALUES ('SUPABASE_ANON_KEY', '')");
+          db.run("INSERT INTO settings (key, value) VALUES ('SUPABASE_AUTO_SYNC', '1')");
         } else if (!err) {
           // Ensure new settings keys exist for backward compatibility
           db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('OPENAI_BASE_URL', '')");
           db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('OPENAI_MODEL', '')");
           db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('SELECTED_EXERCICE_ID', '')");
+          db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('SUPABASE_URL', '')");
+          db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('SUPABASE_ANON_KEY', '')");
+          db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('SUPABASE_AUTO_SYNC', '1')");
         }
       });
     });
@@ -147,6 +240,15 @@ db.runUpdate = function (sql, params = []) {
     db.run(sql, params, function (err) {
       if (err) reject(err);
       else resolve({ changes: this.changes, lastID: this.lastID });
+    });
+  });
+};
+
+db.runGet = function (sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
     });
   });
 };

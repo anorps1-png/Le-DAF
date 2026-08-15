@@ -13,4 +13,4 @@ shell.Run """" & nodeExe & """ """ & serverScript & """", 0, False
 
 ' Laisse le temps au serveur Express de démarrer avant d'ouvrir le navigateur.
 WScript.Sleep 1500
-shell.Run "http://localhost:3000", 1, False
+shell.Run "http://localhost:3003", 1, False

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, Key, CheckCircle, Save } from 'lucide-react';
+import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download } from 'lucide-react';
 
 export const SettingsModule = () => {
   const [keys, setKeys] = useState({ 
@@ -10,7 +10,19 @@ export const SettingsModule = () => {
     OPENAI_MODEL: '',
     DEFAULT_AI: 'gemini' 
   });
+
+  const [supabaseConfig, setSupabaseConfig] = useState({
+    url: '',
+    key: '',
+    autoSync: true
+  });
+
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [savedSupabase, setSavedSupabase] = useState(false);
+  const [showSql, setShowSql] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   useEffect(() => {
     fetch('/api/settings')
@@ -23,9 +35,25 @@ export const SettingsModule = () => {
         OPENAI_MODEL: data.OPENAI_MODEL || '',
         DEFAULT_AI: data.DEFAULT_AI || 'gemini' 
       }));
+
+    fetchSyncStatus();
   }, []);
 
-  const handleSave = async () => {
+  const fetchSyncStatus = () => {
+    fetch('/api/sync/status')
+      .then(res => res.json())
+      .then(data => {
+        setSupabaseConfig({
+          url: data.url || '',
+          key: data.hasKey ? '********' : '',
+          autoSync: data.autoSync
+        });
+        setSyncStatus(data);
+      })
+      .catch(e => console.error(e));
+  };
+
+  const handleSaveAI = async () => {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -35,104 +63,318 @@ export const SettingsModule = () => {
     setTimeout(() => setSaved(false), 3000);
   };
 
+  const handleSaveSupabase = async () => {
+    const payload = {
+      url: supabaseConfig.url,
+      autoSync: supabaseConfig.autoSync
+    };
+    if (supabaseConfig.key && !supabaseConfig.key.includes('***')) {
+      payload.key = supabaseConfig.key;
+    }
+
+    await fetch('/api/sync/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    setSavedSupabase(true);
+    setTimeout(() => setSavedSupabase(false), 3000);
+    fetchSyncStatus();
+  };
+
+  const handleManualSync = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/sync/trigger', { method: 'POST' });
+      const data = await res.json();
+      setSyncStatus(prev => ({ ...prev, lastLog: { message: data.message, status: data.status } }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSyncing(false);
+      fetchSyncStatus();
+    }
+  };
+
   return (
-    <div className="card">
-      <h3 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-        <Settings style={{ color: 'var(--color-primary)' }} />
-        Paramètres du Système & Intelligence Artificielle
-      </h3>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem' }}>
       
-      <div style={{ maxWidth: '600px' }}>
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Clé API Google Gemini</label>
-          <div style={{ position: 'relative' }}>
-            <Key size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
-            <input 
-              type="password" 
-              className="input" 
-              style={{ paddingLeft: '2.5rem' }} 
-              value={keys.GEMINI_API_KEY}
-              onChange={e => setKeys({...keys, GEMINI_API_KEY: e.target.value})}
-              placeholder="AIzaSy..." 
-            />
+      {/* CARD 1 : SYNCHRONISATION SUPABASE & MODE HORS-LIGNE */}
+      <div className="card">
+        <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--color-primary-dark)' }}>
+          <Cloud style={{ color: 'var(--color-primary)' }} />
+          Synchronisation Supabase (Cloud & Offline-First)
+        </h3>
+
+        <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>
+              Mode de synchronisation :
+            </span>
+            <button
+              className={`btn ${supabaseConfig.autoSync ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setSupabaseConfig({ ...supabaseConfig, autoSync: !supabaseConfig.autoSync })}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+                fontSize: '0.85rem',
+                background: supabaseConfig.autoSync ? 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)' : '#e2e8f0',
+                borderColor: supabaseConfig.autoSync ? '#15803d' : '#cbd5e1',
+                color: supabaseConfig.autoSync ? '#fff' : '#475569'
+              }}
+            >
+              {supabaseConfig.autoSync ? <Cloud size={16} /> : <CloudOff size={16} />}
+              {supabaseConfig.autoSync ? 'Auto-Sync Activé' : 'Mode 100% Local (Sync Désactivé)'}
+            </button>
           </div>
+
+          <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+            {supabaseConfig.autoSync ? (
+              '⚡ Vos travaux sont sauvegardés en local puis envoyés automatiquement sur Supabase dès qu\'Internet est disponible.'
+            ) : (
+              '🔒 Vos données restent exclusivement stockées sur votre PC dans SQLite. Aucune synchronisation distante.'
+            )}
+          </p>
         </div>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Clé API OpenAI / Sublyx</label>
-          <div style={{ position: 'relative' }}>
-            <Key size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
-            <input 
-              type="password" 
-              className="input" 
-              style={{ paddingLeft: '2.5rem' }} 
-              value={keys.OPENAI_API_KEY}
-              onChange={e => setKeys({...keys, OPENAI_API_KEY: e.target.value})}
-              placeholder="sk-..." 
-            />
-          </div>
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>URL de Base OpenAI / Sublyx</label>
+        <div style={{ marginBottom: '1.25rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>URL du projet Supabase</label>
           <input 
             type="text" 
             className="input" 
-            value={keys.OPENAI_BASE_URL}
-            onChange={e => setKeys({...keys, OPENAI_BASE_URL: e.target.value})}
-            placeholder="https://api.openai.com/v1 (Laisser vide pour l'officiel, utiliser https://api.sublyx.org/v1 pour Sublyx)" 
+            value={supabaseConfig.url}
+            onChange={e => setSupabaseConfig({...supabaseConfig, url: e.target.value})}
+            placeholder="https://xyz.supabase.co" 
           />
         </div>
 
         <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Modèle OpenAI</label>
-          <input 
-            type="text" 
-            className="input" 
-            value={keys.OPENAI_MODEL}
-            onChange={e => setKeys({...keys, OPENAI_MODEL: e.target.value})}
-            placeholder="gpt-3.5-turbo (Laisser vide pour le modèle par défaut)" 
-          />
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Clé API DeepSeek</label>
+          <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Clé API Publique Supabase (Anon / Service Key)</label>
           <div style={{ position: 'relative' }}>
-            <Key size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
+            <Key size={16} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
             <input 
               type="password" 
               className="input" 
-              style={{ paddingLeft: '2.5rem' }} 
-              value={keys.DEEPSEEK_API_KEY}
-              onChange={e => setKeys({...keys, DEEPSEEK_API_KEY: e.target.value})}
-              placeholder="sk-..." 
+              style={{ paddingLeft: '2.25rem' }} 
+              value={supabaseConfig.key}
+              onChange={e => setSupabaseConfig({...supabaseConfig, key: e.target.value})}
+              placeholder="eyJhbGciOiJIUzI1NiIsIn..." 
             />
           </div>
         </div>
 
-        <div style={{ marginBottom: '2rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Modèle d'IA par défaut</label>
-          <select 
-            className="input" 
-            value={keys.DEFAULT_AI}
-            onChange={e => setKeys({...keys, DEFAULT_AI: e.target.value})}
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
+          <button className="btn btn-primary" onClick={handleSaveSupabase} style={{ flex: 1 }}>
+            <Save size={16} /> Enregistrer Supabase
+          </button>
+          <button 
+            className="btn btn-secondary" 
+            onClick={handleManualSync} 
+            disabled={isSyncing}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           >
-            <option value="gemini">Google Gemini 1.5 Flash (Recommandé)</option>
-            <option value="openai">OpenAI GPT-3.5/GPT-4</option>
-            <option value="deepseek">DeepSeek (Recommandé pour la programmation et la comptabilité)</option>
-          </select>
+            <RefreshCw size={16} className={isSyncing ? 'spin' : ''} /> ⚡ Synchroniser
+          </button>
         </div>
 
-        <button className="btn btn-primary" onClick={handleSave}>
-          <Save size={18} /> Sauvegarder les clés
-        </button>
-
-        {saved && (
-          <div style={{ marginTop: '1rem', color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 500 }}>
-            <CheckCircle size={18} /> Paramètres enregistrés avec succès. L'Agent est prêt !
+        {savedSupabase && (
+          <div style={{ marginBottom: '1rem', color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', fontWeight: 500 }}>
+            <CheckCircle size={16} /> Configuration Supabase mise à jour.
           </div>
         )}
+
+        {syncStatus && (
+          <div style={{ padding: '0.75rem', background: '#f1f5f9', borderRadius: 'var(--radius-md)', fontSize: '0.8rem', border: '1px solid var(--color-border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+              <span>Modifications locales en attente :</span>
+              <strong style={{ color: syncStatus.pendingCount > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>
+                {syncStatus.pendingCount} écriture(s)
+              </strong>
+            </div>
+            {syncStatus.lastLog && (
+              <div style={{ color: 'var(--color-text-muted)', marginTop: '0.25rem', fontSize: '0.75rem' }}>
+                Dernier statut : {syncStatus.lastLog.message}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--color-border)' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <a
+              href="/api/sync/schema-script"
+              download="supabase_schema.sql"
+              className="btn btn-secondary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', textDecoration: 'none' }}
+            >
+              <Download size={14} /> 📥 Télécharger le script SQL (.sql)
+            </a>
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                setShowSql(!showSql);
+              }}
+              style={{ fontSize: '0.8rem' }}
+            >
+              {showSql ? 'Masquer le code SQL' : '📋 Afficher / Copier le Script SQL'}
+            </button>
+          </div>
+
+          {showSql && (
+            <div style={{ marginTop: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)' }}>
+                  Copiez ce code et collez-le dans le SQL Editor de Supabase :
+                </span>
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem' }}
+                  onClick={() => {
+                    const sqlText = `-- SCRIPT SUPABASE AGENT OHADA\nCREATE TABLE IF NOT EXISTS public.journal ( id BIGINT PRIMARY KEY, code_journal TEXT, poste_budgetaire TEXT, date TEXT, compte TEXT, compte_tiers TEXT, libelle TEXT, n_facture TEXT, reference TEXT, debit NUMERIC DEFAULT 0, credit NUMERIC DEFAULT 0, piece_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() );\nCREATE TABLE IF NOT EXISTS public.tiers ( id BIGINT PRIMARY KEY, type TEXT, nom TEXT UNIQUE, compte_comptable TEXT, solde NUMERIC DEFAULT 0, statut TEXT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() );\nCREATE TABLE IF NOT EXISTS public.exercices ( id BIGINT PRIMARY KEY, libelle TEXT NOT NULL, date_debut TEXT NOT NULL, date_fin TEXT NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() );\nCREATE TABLE IF NOT EXISTS public.chart_of_accounts ( compte TEXT PRIMARY KEY, libelle TEXT NOT NULL, source_doc_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() );\nCREATE TABLE IF NOT EXISTS public.business_rules ( id BIGINT PRIMARY KEY, doc_id BIGINT, pattern TEXT NOT NULL, condition_type TEXT DEFAULT 'contains', target_account TEXT, target_journal TEXT, vat_rate NUMERIC DEFAULT 0, confidence_score NUMERIC DEFAULT 1.0, auto_learned INT DEFAULT 0, occurrences INT DEFAULT 1, description TEXT, is_active INT DEFAULT 1, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() );\nALTER TABLE public.journal ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.tiers ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.exercices ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.chart_of_accounts ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.business_rules ENABLE ROW LEVEL SECURITY;\nCREATE POLICY "Allow anonymous read access" ON public.journal FOR SELECT USING (true);\nCREATE POLICY "Allow anonymous insert access" ON public.journal FOR INSERT WITH CHECK (true);\nCREATE POLICY "Allow anonymous update access" ON public.journal FOR UPDATE USING (true);\nCREATE POLICY "Allow anonymous read access" ON public.tiers FOR SELECT USING (true);\nCREATE POLICY "Allow anonymous insert access" ON public.tiers FOR INSERT WITH CHECK (true);\nCREATE POLICY "Allow anonymous update access" ON public.tiers FOR UPDATE USING (true);\nCREATE POLICY "Allow anonymous read access" ON public.exercices FOR SELECT USING (true);\nCREATE POLICY "Allow anonymous insert access" ON public.exercices FOR INSERT WITH CHECK (true);\nCREATE POLICY "Allow anonymous update access" ON public.exercices FOR UPDATE USING (true);\nCREATE POLICY "Allow anonymous read access" ON public.chart_of_accounts FOR SELECT USING (true);\nCREATE POLICY "Allow anonymous insert access" ON public.chart_of_accounts FOR INSERT WITH CHECK (true);\nCREATE POLICY "Allow anonymous update access" ON public.chart_of_accounts FOR UPDATE USING (true);\nCREATE POLICY "Allow anonymous read access" ON public.business_rules FOR SELECT USING (true);\nCREATE POLICY "Allow anonymous insert access" ON public.business_rules FOR INSERT WITH CHECK (true);\nCREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDATE USING (true);`;
+                    navigator.clipboard.writeText(sqlText);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2500);
+                  }}
+                >
+                  {copiedSql ? '✓ Copié !' : '📋 Copier tout'}
+                </button>
+              </div>
+              <textarea
+                readOnly
+                className="input"
+                style={{ fontFamily: 'monospace', fontSize: '0.75rem', height: '180px', background: '#0f172a', color: '#f8fafc', width: '100%' }}
+                value={`-- SCRIPT SUPABASE AGENT OHADA (LE-DAF)
+CREATE TABLE IF NOT EXISTS public.journal (
+  id BIGINT PRIMARY KEY, code_journal TEXT, poste_budgetaire TEXT, date TEXT, compte TEXT, compte_tiers TEXT, libelle TEXT, n_facture TEXT, reference TEXT, debit NUMERIC DEFAULT 0, credit NUMERIC DEFAULT 0, piece_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS public.tiers (
+  id BIGINT PRIMARY KEY, type TEXT, nom TEXT UNIQUE, compte_comptable TEXT, solde NUMERIC DEFAULT 0, statut TEXT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS public.exercices (
+  id BIGINT PRIMARY KEY, libelle TEXT NOT NULL, date_debut TEXT NOT NULL, date_fin TEXT NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS public.chart_of_accounts (
+  compte TEXT PRIMARY KEY, libelle TEXT NOT NULL, source_doc_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS public.business_rules (
+  id BIGINT PRIMARY KEY, doc_id BIGINT, pattern TEXT NOT NULL, condition_type TEXT DEFAULT 'contains', target_account TEXT, target_journal TEXT, vat_rate NUMERIC DEFAULT 0, confidence_score NUMERIC DEFAULT 1.0, auto_learned INT DEFAULT 0, occurrences INT DEFAULT 1, description TEXT, is_active INT DEFAULT 1, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+ALTER TABLE public.journal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tiers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.exercices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chart_of_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.business_rules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anonymous read access" ON public.journal FOR SELECT USING (true);
+CREATE POLICY "Allow anonymous insert access" ON public.journal FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anonymous update access" ON public.journal FOR UPDATE USING (true);
+CREATE POLICY "Allow anonymous read access" ON public.tiers FOR SELECT USING (true);
+CREATE POLICY "Allow anonymous insert access" ON public.tiers FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anonymous update access" ON public.tiers FOR UPDATE USING (true);
+CREATE POLICY "Allow anonymous read access" ON public.exercices FOR SELECT USING (true);
+CREATE POLICY "Allow anonymous insert access" ON public.exercices FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anonymous update access" ON public.exercices FOR UPDATE USING (true);
+CREATE POLICY "Allow anonymous read access" ON public.chart_of_accounts FOR SELECT USING (true);
+CREATE POLICY "Allow anonymous insert access" ON public.chart_of_accounts FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anonymous update access" ON public.chart_of_accounts FOR UPDATE USING (true);
+CREATE POLICY "Allow anonymous read access" ON public.business_rules FOR SELECT USING (true);
+CREATE POLICY "Allow anonymous insert access" ON public.business_rules FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDATE USING (true);`}
+              />
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* CARD 2 : PARAMÈTRES IA (GEMINI, OPENAI, DEEPSEEK) */}
+      <div className="card">
+        <h3 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Settings style={{ color: 'var(--color-primary)' }} />
+          Paramètres Intelligence Artificielle (IA)
+        </h3>
+        
+        <div>
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Clé API Google Gemini</label>
+            <div style={{ position: 'relative' }}>
+              <Key size={16} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
+              <input 
+                type="password" 
+                className="input" 
+                style={{ paddingLeft: '2.25rem' }} 
+                value={keys.GEMINI_API_KEY}
+                onChange={e => setKeys({...keys, GEMINI_API_KEY: e.target.value})}
+                placeholder="AIzaSy..." 
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Clé API OpenAI / Sublyx</label>
+            <div style={{ position: 'relative' }}>
+              <Key size={16} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
+              <input 
+                type="password" 
+                className="input" 
+                style={{ paddingLeft: '2.25rem' }} 
+                value={keys.OPENAI_API_KEY}
+                onChange={e => setKeys({...keys, OPENAI_API_KEY: e.target.value})}
+                placeholder="sk-..." 
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>URL de Base OpenAI / Sublyx</label>
+            <input 
+              type="text" 
+              className="input" 
+              value={keys.OPENAI_BASE_URL}
+              onChange={e => setKeys({...keys, OPENAI_BASE_URL: e.target.value})}
+              placeholder="https://api.openai.com/v1" 
+            />
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Clé API DeepSeek</label>
+            <div style={{ position: 'relative' }}>
+              <Key size={16} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />
+              <input 
+                type="password" 
+                className="input" 
+                style={{ paddingLeft: '2.25rem' }} 
+                value={keys.DEEPSEEK_API_KEY}
+                onChange={e => setKeys({...keys, DEEPSEEK_API_KEY: e.target.value})}
+                placeholder="sk-..." 
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '1.5rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Modèle d'IA par défaut</label>
+            <select 
+              className="input" 
+              value={keys.DEFAULT_AI}
+              onChange={e => setKeys({...keys, DEFAULT_AI: e.target.value})}
+            >
+              <option value="gemini">Google Gemini 1.5 Flash (Recommandé)</option>
+              <option value="openai">OpenAI GPT-3.5/GPT-4</option>
+              <option value="deepseek">DeepSeek (Recommandé pour la comptabilité)</option>
+            </select>
+          </div>
+
+          <button className="btn btn-primary" onClick={handleSaveAI}>
+            <Save size={16} /> Sauvegarder les clés IA
+          </button>
+
+          {saved && (
+            <div style={{ marginTop: '1rem', color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', fontWeight: 500 }}>
+              <CheckCircle size={16} /> Clés IA enregistrées avec succès !
+            </div>
+          )}
+        </div>
+      </div>
+
     </div>
   );
 };

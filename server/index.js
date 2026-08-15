@@ -184,6 +184,93 @@ function normalizeDate(value) {
   return str;
 }
 
+// Génère automatiquement les contreparties de trésorerie (Caisse 571100 ou Banque 521100)
+// pour toute opération importée sur journal Caisse (CAISPR, CA) ou Banque (BQ, BANQUE, etc.)
+// quel que soit le sens (règlement au débit ou encaissement au crédit d'un tiers/compte).
+function expandTreasuryCounterparts(rows) {
+  const result = [];
+  rows.forEach((r, i) => {
+    result.push(r);
+    
+    const isCaisseJournal = /CAIS|CA/i.test(r.code_journal);
+    const isBanqueJournal = /BANQ|BQ|BNQ|BNC|SGBC|UBA|ECOR/i.test(r.code_journal);
+
+    if (!isCaisseJournal && !isBanqueJournal) return;
+
+    const prevRow = rows[i - 1];
+    const nextRow = rows[i + 1];
+
+    if (isCaisseJournal) {
+      const prevIs57 = prevRow && /^57/.test(prevRow.compte);
+      const nextIs57 = nextRow && /^57/.test(nextRow.compte);
+
+      if (!prevIs57 && !nextIs57) {
+        if (r.debit > 0) {
+          result.push({
+            code_journal: r.code_journal,
+            poste_budgetaire: r.poste_budgetaire || 'CAISSE',
+            date: r.date,
+            compte: '571100',
+            compte_tiers: r.compte_tiers,
+            libelle: `Règlement Caisse (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
+            n_facture: r.n_facture,
+            reference: r.reference,
+            debit: 0,
+            credit: r.debit
+          });
+        } else if (r.credit > 0) {
+          result.push({
+            code_journal: r.code_journal,
+            poste_budgetaire: r.poste_budgetaire || 'CAISSE',
+            date: r.date,
+            compte: '571100',
+            compte_tiers: r.compte_tiers,
+            libelle: `Encaissement Caisse (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
+            n_facture: r.n_facture,
+            reference: r.reference,
+            debit: r.credit,
+            credit: 0
+          });
+        }
+      }
+    } else if (isBanqueJournal) {
+      const prevIs52 = prevRow && /^52/.test(prevRow.compte);
+      const nextIs52 = nextRow && /^52/.test(nextRow.compte);
+
+      if (!prevIs52 && !nextIs52) {
+        if (r.debit > 0) {
+          result.push({
+            code_journal: r.code_journal,
+            poste_budgetaire: r.poste_budgetaire || 'BANQUE',
+            date: r.date,
+            compte: '521100',
+            compte_tiers: r.compte_tiers,
+            libelle: `Règlement Banque (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
+            n_facture: r.n_facture,
+            reference: r.reference,
+            debit: 0,
+            credit: r.debit
+          });
+        } else if (r.credit > 0) {
+          result.push({
+            code_journal: r.code_journal,
+            poste_budgetaire: r.poste_budgetaire || 'BANQUE',
+            date: r.date,
+            compte: '521100',
+            compte_tiers: r.compte_tiers,
+            libelle: `Encaissement Banque (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
+            n_facture: r.n_facture,
+            reference: r.reference,
+            debit: r.credit,
+            credit: 0
+          });
+        }
+      }
+    }
+  });
+  return result;
+}
+
 app.post('/api/import', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier fourni' });
   const type = req.body.type; // 'tiers', 'journal'
@@ -224,16 +311,16 @@ app.post('/api/import', upload.single('file'), (req, res) => {
              normRow[normKey] = row[key];
           }
 
-          const code_journal = normRow['codejournal'] || '';
-          const poste_budgetaire = normRow['postebudgetaire'] || '';
+          const code_journal = normRow['codejournal'] || normRow['journal'] || normRow['code'] || '';
+          const poste_budgetaire = normRow['postebudgetaire'] || normRow['postebudget'] || normRow['poste'] || '';
           const date = normalizeDate(normRow['date']);
-          const compte = String(normRow['compte'] || normRow['comptegeneral'] || normRow['ncompte'] || normRow['numcompte'] || normRow['comptecomptable'] || '');
-          const compte_tiers = String(normRow['comptetiers'] || '');
-          const libelle = normRow['libelle'] || normRow['libelleecriture'] || normRow['designation'] || normRow['description'] || '';
-          const n_facture = String(normRow['nfacture'] || normRow['numfacture'] || '');
-          const reference = String(normRow['reference'] || '');
-          const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || 0;
-          const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || 0;
+          const compte = String(normRow['compte'] || normRow['comptegeneral'] || normRow['ncompte'] || normRow['numcompte'] || normRow['comptecomptable'] || normRow['general'] || '');
+          const compte_tiers = String(normRow['comptetiers'] || normRow['tiers'] || normRow['nomtiers'] || normRow['auxiliaire'] || '');
+          const libelle = normRow['libelle'] || normRow['libelleecriture'] || normRow['designation'] || normRow['description'] || normRow['libellecomplet'] || '';
+          const n_facture = String(normRow['nfacture'] || normRow['numfacture'] || normRow['facture'] || normRow['numpiece'] || '');
+          const reference = String(normRow['reference'] || normRow['ref'] || '');
+          const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || parseFloat(normRow['debits']) || 0;
+          const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || parseFloat(normRow['credits']) || 0;
 
           if (compte || debit > 0 || credit > 0) {
             journalRows.push({ code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit });
@@ -241,9 +328,12 @@ app.post('/api/import', upload.single('file'), (req, res) => {
           }
         });
 
+        // Génération automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
+        const finalRows = expandTreasuryCounterparts(journalRows);
+
         // Un fichier journal complet doit rester équilibré dans son ensemble.
-        const totalDebit = journalRows.reduce((s, r) => s + r.debit, 0);
-        const totalCredit = journalRows.reduce((s, r) => s + r.credit, 0);
+        const totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
+        const totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
         if (Math.abs(totalDebit - totalCredit) > 0.01) {
           db.run("ROLLBACK");
           const gap = Math.round(Math.abs(totalDebit - totalCredit));
@@ -253,7 +343,7 @@ app.post('/api/import', upload.single('file'), (req, res) => {
             ? 'Régularisation Contrepartie Fournisseur (Équilibrage SYSCOHADA)' 
             : 'Régularisation Contrepartie Client (Équilibrage SYSCOHADA)';
           const codeJournal = isDebitLarger ? 'AC' : 'VE';
-          const refDate = journalRows[0] ? journalRows[0].date : new Date().toISOString().split('T')[0];
+          const refDate = finalRows[0] ? finalRows[0].date : new Date().toISOString().split('T')[0];
 
           return res.status(400).json({
             error: `Fichier rejeté : le total des débits (${totalDebit.toLocaleString()}) ne correspond pas au total des crédits (${totalCredit.toLocaleString()}), écart de ${gap.toLocaleString()}. Corrigez le fichier avant de réimporter.`,
@@ -280,7 +370,7 @@ app.post('/api/import', upload.single('file'), (req, res) => {
           });
         }
 
-        journalRows.forEach(r => {
+        finalRows.forEach(r => {
           stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
         });
         stmt.finalize();
@@ -573,16 +663,16 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
           normRow[normKey] = row[k];
         }
 
-        const code_journal = normRow['codejournal'] || 'AC';
-        const poste_budgetaire = normRow['postebudgetaire'] || 'ACHATS';
-        const date = normRow['date'] || new Date().toISOString().split('T')[0];
-        const compte = String(normRow['compte'] || normRow['comptegeneral'] || normRow['ncompte'] || normRow['numcompte'] || '601100');
-        const compte_tiers = String(normRow['comptetiers'] || '');
-        const libelle = normRow['libelle'] || normRow['libelleecriture'] || normRow['designation'] || 'Écriture importée';
-        const n_facture = String(normRow['nfacture'] || normRow['numfacture'] || '');
-        const reference = String(normRow['reference'] || '');
-        const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || 0;
-        const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || 0;
+        const code_journal = normRow['codejournal'] || normRow['journal'] || normRow['code'] || 'AC';
+        const poste_budgetaire = normRow['postebudgetaire'] || normRow['postebudget'] || normRow['poste'] || '';
+        const date = normalizeDate(normRow['date']) || new Date().toISOString().split('T')[0];
+        const compte = String(normRow['compte'] || normRow['comptegeneral'] || normRow['ncompte'] || normRow['numcompte'] || normRow['comptecomptable'] || '601100');
+        const compte_tiers = String(normRow['comptetiers'] || normRow['tiers'] || normRow['nomtiers'] || normRow['auxiliaire'] || '');
+        const libelle = normRow['libelle'] || normRow['libelleecriture'] || normRow['designation'] || normRow['description'] || 'Écriture importée';
+        const n_facture = String(normRow['nfacture'] || normRow['numfacture'] || normRow['facture'] || normRow['numpiece'] || '');
+        const reference = String(normRow['reference'] || normRow['ref'] || '');
+        const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || parseFloat(normRow['debits']) || 0;
+        const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || parseFloat(normRow['credits']) || 0;
 
         if (compte || debit > 0 || credit > 0) {
           journalRows.push({ code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit });
@@ -600,6 +690,12 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
       return res.status(400).json({ error: 'Aucun fichier ni écriture fournie.' });
     }
 
+    // Expansion automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
+    const finalRows = expandTreasuryCounterparts(journalRows);
+
+    totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
+    totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
+
     const gap = Math.round(Math.abs(totalDebit - totalCredit));
     let balancingMessage = '';
 
@@ -610,9 +706,9 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
         ? 'Régularisation Contrepartie Fournisseur (Équilibrage SYSCOHADA)' 
         : 'Régularisation Contrepartie Client (Équilibrage SYSCOHADA)';
       const codeJournal = isDebitLarger ? 'AC' : 'VE';
-      const refDate = journalRows[0] ? journalRows[0].date : new Date().toISOString().split('T')[0];
+      const refDate = finalRows[0] ? finalRows[0].date : new Date().toISOString().split('T')[0];
 
-      journalRows.push({
+      finalRows.push({
         code_journal: codeJournal,
         poste_budgetaire: 'RÉGULARISATION',
         date: refDate,
@@ -632,7 +728,7 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
       db.run("BEGIN TRANSACTION");
       const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       
-      journalRows.forEach(r => {
+      finalRows.forEach(r => {
         stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
       });
       stmt.finalize();
@@ -1178,6 +1274,574 @@ app.get('/api/resultat', async (req, res) => {
   }
 });
 
+// --- DYNAMIC JOURNALS LIST ENDPOINT ---
+app.get('/api/journals-list', async (req, res) => {
+  try {
+    const rows = await db.runSelect("SELECT DISTINCT code_journal FROM journal WHERE code_journal IS NOT NULL AND code_journal != '' ORDER BY code_journal ASC");
+    const codesInDb = rows.map(r => r.code_journal);
+    const defaultCodes = ['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR'];
+    const merged = Array.from(new Set([...defaultCodes, ...codesInDb]));
+    res.json(merged);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- OHADA PLAN DICTIONARY FOR EXPORTS ---
+const OHADA_PLAN_DICT = {
+  "10": "CAPITAL",
+  "13": "RÉSULTAT NET DE L'EXERCICE",
+  "16": "EMPRUNTS ET DETTES ASSIMILÉES",
+  "21": "IMMOBILISATIONS INCORPORELLES",
+  "22": "TERRAINS",
+  "23": "BÂTIMENTS ET INSTALLATIONS",
+  "24": "MATÉRIEL ET MOBILIER",
+  "28": "AMORTISSEMENTS",
+  "31": "MARCHANDISES",
+  "32": "MATIÈRES PREMIÈRES ET FOURNITURES",
+  "40": "FOURNISSEURS ET COMPTES RATTACHÉS",
+  "401": "FOURNISSEURS D'EXPLOITATION",
+  "41": "CLIENTS ET COMPTES RATTACHÉS",
+  "411": "CLIENTS",
+  "42": "PERSONNEL",
+  "422": "PERSONNEL, RÉMUNÉRATIONS DUES",
+  "43": "ORGANISMES SOCIAUX",
+  "44": "ÉTAT ET COLLECTIVITÉS PUBLIQUES",
+  "46": "DÉBITEURS ET CRÉDITEURS DIVERS",
+  "47": "COMPTES TRANSITOIRES OU D'ATTENTE",
+  "48": "CRÉANCES ET DETTES (HAO)",
+  "50": "TITRES DE PLACEMENT",
+  "51": "VALEURS À L'ENCAISSEMENT",
+  "52": "BANQUES",
+  "53": "ÉTABLISSEMENTS FINANCIERS",
+  "54": "INSTRUMENTS DE TRÉSORERIE",
+  "56": "BANQUES, CRÉDITS DE TRÉSORERIE",
+  "57": "CAISSE",
+  "571": "CAISSE PRINCIPALE",
+  "58": "VIREMENTS INTERNES",
+  "60": "ACHATS ET VARIATIONS DE STOCKS",
+  "601": "ACHATS DE MARCHANDISES",
+  "602": "ACHATS DE MATIÈRES PREMIÈRES",
+  "604": "ACHATS D'ÉTUDES ET PRESTATIONS DE SERVICES",
+  "605": "AUTRES ACHATS",
+  "61": "TRANSPORTS",
+  "618": "AUTRES FRAIS DE TRANSPORT",
+  "62": "SERVICES EXTÉRIEURS A",
+  "621": "PERSONNEL EXTÉRIEUR À L'ENTREPRISE",
+  "624": "ENTRETIEN ET MAINTENANCE",
+  "628": "FRAIS DE TÉLÉCOMMUNICATIONS",
+  "63": "SERVICES EXTÉRIEURS B",
+  "632": "HONORAIRES ET CONSEILS",
+  "64": "IMPÔTS ET TAXES",
+  "65": "AUTRES CHARGES",
+  "66": "CHARGES DE PERSONNEL",
+  "67": "FRAIS FINANCIERS",
+  "68": "DOTATIONS AUX AMORTISSEMENTS",
+  "70": "VENTES",
+  "71": "SUBVENTIONS D'EXPLOITATION",
+  "73": "VARIATION DES STOCKS DE BIENS",
+  "75": "AUTRES PRODUITS",
+  "77": "REVENUS FINANCIERS",
+  "81": "VALEURS COMP. CESSIONS IMMOB.",
+  "82": "PRODUITS CESSIONS IMMOB.",
+  "83": "CHARGES (HAO)",
+  "84": "PRODUITS (HAO)",
+  "89": "IMPÔTS SUR LE RÉSULTAT"
+};
+
+function getAccountLabelServer(compteStr, customMap = {}) {
+  const str = String(compteStr || '').trim();
+  if (customMap[str]) return customMap[str];
+  for (let i = str.length; i >= 2; i--) {
+    const prefix = str.substring(0, i);
+    if (customMap[prefix]) return customMap[prefix];
+    if (OHADA_PLAN_DICT[prefix]) return OHADA_PLAN_DICT[prefix];
+  }
+  return `COMPTE ${str}`;
+}
+
+const PDFDocument = require('pdfkit');
+
+// --- ROUTE D'EXPORTATION EXCEL / PDF DES ÉTATS FINANCIERS SYSCOHADA ---
+app.get('/api/export/etats-financiers', async (req, res) => {
+  try {
+    const type = req.query.type || 'pack'; // 'pack', 'bilan', 'resultat', 'balance', 'journal'
+    const format = (req.query.format || 'excel').toLowerCase(); // 'excel' ou 'pdf'
+    const searchParam = String(req.query.search || req.query.compte || '').trim().toLowerCase();
+    const classeParam = String(req.query.classe || '').trim();
+
+    const { clause, params } = await getExerciceDateFilter();
+    
+    // Fetch custom account titles map
+    const customRows = await db.runSelect("SELECT compte, libelle FROM chart_of_accounts");
+    const customMap = {};
+    (customRows || []).forEach(r => { customMap[r.compte] = r.libelle; });
+
+    let rawBalanceRows = await db.runSelect(`
+      SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
+      FROM journal
+      ${clause ? `WHERE ${clause}` : ''}
+      GROUP BY compte
+      ORDER BY compte ASC
+    `, params);
+
+    let rawJournalRows = await db.runSelect(`
+      SELECT * FROM journal
+      ${clause ? `WHERE ${clause}` : ''}
+      ORDER BY date ASC, id ASC
+    `, params);
+
+    // Apply active UI filters if present
+    const balanceRows = rawBalanceRows.filter(r => {
+      const compteStr = String(r.compte || '');
+      const label = getAccountLabelServer(compteStr, customMap).toLowerCase();
+      const matchSearch = !searchParam || compteStr.startsWith(searchParam) || compteStr.includes(searchParam) || label.includes(searchParam);
+      const matchClass = !classeParam || compteStr.startsWith(classeParam);
+      return matchSearch && matchClass;
+    });
+
+    const journalRows = rawJournalRows.filter(r => {
+      const compteStr = String(r.compte || '');
+      const label = getAccountLabelServer(compteStr, customMap).toLowerCase();
+      const matchSearch = !searchParam || compteStr.startsWith(searchParam) || compteStr.includes(searchParam) || label.includes(searchParam);
+      const matchClass = !classeParam || compteStr.startsWith(classeParam);
+      return matchSearch && matchClass;
+    });
+
+    const { bilan, resultat } = computeEtatsFinanciers(rawBalanceRows);
+
+    // --- PDF EXPORT OPTION (FORMATTED ACCOUNTING TABLES) ---
+    if (format === 'pdf') {
+      const isLandscape = type === 'balance' || type === 'journal' || type === 'pack';
+      const filename = type === 'pack' ? 'etats_financiers_syscohada.pdf' : `${type}_syscohada.pdf`;
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+      const doc = new PDFDocument({ margin: 30, size: 'A4', layout: isLandscape ? 'landscape' : 'portrait' });
+      doc.pipe(res);
+
+      const pageWidth = isLandscape ? 841.89 : 595.28;
+      const contentWidth = pageWidth - 60;
+
+      // Title Header
+      doc.fontSize(16).fillColor('#0f172a').text('COMPTABILITÉ & ÉTATS FINANCIERS SYSCOHADA', { align: 'center' });
+      doc.fontSize(9).fillColor('#64748b').text(`Généré le ${new Date().toLocaleDateString('fr-FR')} par Agent DAF / Le-DAF`, { align: 'center' });
+      if (searchParam || classeParam) {
+        doc.fontSize(8).fillColor('#1e40af').text(`Filtres appliqués : Recherche = "${searchParam || 'Toutes'}", Classe = "${classeParam || 'Toutes'}"`, { align: 'center' });
+      }
+      doc.moveDown(0.8);
+
+      const checkPageBreak = (neededHeight) => {
+        if (doc.y + neededHeight > (isLandscape ? 540 : 770)) {
+          doc.addPage();
+          return true;
+        }
+        return false;
+      };
+
+      // 1. RENDER BALANCE TABLE
+      if (type === 'pack' || type === 'balance') {
+        doc.fontSize(12).fillColor('#1e293b').font('Helvetica-Bold').text('BALANCE GÉNÉRALE DES COMPTES (FORMAT SAGE 100 SYSCOHADA)', { underline: true });
+        doc.moveDown(0.4);
+
+        const colWidths = [75, 265, 110, 110, 110, 110];
+        const drawBalanceHeader = (y) => {
+          doc.rect(30, y, contentWidth, 24).fillAndStroke('#f1f5f9', '#cbd5e1');
+          doc.fillColor('#0f172a').fontSize(8.5).font('Helvetica-Bold');
+          let x = 30;
+          const headers = ['N° Compte', 'Intitulé des comptes', 'Mvt Débit', 'Mvt Crédit', 'Solde Débiteur', 'Solde Créditeur'];
+          headers.forEach((h, i) => {
+            const align = i >= 2 ? 'right' : 'left';
+            doc.text(h, x + 4, y + 7, { width: colWidths[i] - 8, align });
+            x += colWidths[i];
+          });
+        };
+
+        let y = doc.y;
+        drawBalanceHeader(y);
+        y += 24;
+
+        const groups = {};
+        let bilanD = 0, bilanC = 0, gestionD = 0, gestionC = 0, grandD = 0, grandC = 0;
+
+        balanceRows.forEach(r => {
+          const compteStr = String(r.compte);
+          const root = compteStr.substring(0, 2);
+          if (!groups[root]) groups[root] = { rows: [], tD: 0, tC: 0 };
+          groups[root].rows.push(r);
+          groups[root].tD += (r.total_debit || 0);
+          groups[root].tC += (r.total_credit || 0);
+
+          const rootClass = parseInt(compteStr.substring(0, 1), 10);
+          if (rootClass >= 1 && rootClass <= 5) {
+            bilanD += (r.total_debit || 0);
+            bilanC += (r.total_credit || 0);
+          } else {
+            gestionD += (r.total_debit || 0);
+            gestionC += (r.total_credit || 0);
+          }
+          grandD += (r.total_debit || 0);
+          grandC += (r.total_credit || 0);
+        });
+
+        Object.keys(groups).sort().forEach(root => {
+          const g = groups[root];
+          const subSolde = g.tD - g.tC;
+
+          g.rows.forEach(r => {
+            if (checkPageBreak(22)) {
+              y = doc.y;
+              drawBalanceHeader(y);
+              y += 24;
+            }
+
+            const label = getAccountLabelServer(r.compte, customMap);
+            const solde = (r.total_debit || 0) - (r.total_credit || 0);
+
+            doc.rect(30, y, contentWidth, 20).stroke('#e2e8f0');
+            doc.fillColor('#1e293b').fontSize(8).font('Helvetica');
+
+            let x = 30;
+            doc.text(r.compte, x + 4, y + 5, { width: colWidths[0] - 8, align: 'left' }); x += colWidths[0];
+            doc.text(label.substring(0, 48), x + 4, y + 5, { width: colWidths[1] - 8, align: 'left' }); x += colWidths[1];
+            doc.text(r.total_debit > 0 ? Math.round(r.total_debit).toLocaleString() : '', x + 4, y + 5, { width: colWidths[2] - 8, align: 'right' }); x += colWidths[2];
+            doc.text(r.total_credit > 0 ? Math.round(r.total_credit).toLocaleString() : '', x + 4, y + 5, { width: colWidths[3] - 8, align: 'right' }); x += colWidths[3];
+            doc.text(solde > 0 ? Math.round(solde).toLocaleString() : '', x + 4, y + 5, { width: colWidths[4] - 8, align: 'right' }); x += colWidths[4];
+            doc.text(solde < 0 ? Math.round(Math.abs(solde)).toLocaleString() : '', x + 4, y + 5, { width: colWidths[5] - 8, align: 'right' });
+
+            y += 20;
+          });
+
+          // Sub-total row
+          if (checkPageBreak(22)) {
+            y = doc.y;
+            drawBalanceHeader(y);
+            y += 24;
+          }
+
+          doc.rect(30, y, contentWidth, 20).fillAndStroke('#f8fafc', '#cbd5e1');
+          doc.fillColor('#0f172a').fontSize(8).font('Helvetica-Bold');
+
+          let x = 30;
+          doc.text(root, x + 4, y + 5, { width: colWidths[0] - 8, align: 'left' }); x += colWidths[0];
+          doc.text(`***SOUS-TOTAL ${getAccountLabelServer(root, customMap)}`, x + 4, y + 5, { width: colWidths[1] - 8, align: 'left' }); x += colWidths[1];
+          doc.text(g.tD > 0 ? Math.round(g.tD).toLocaleString() : '', x + 4, y + 5, { width: colWidths[2] - 8, align: 'right' }); x += colWidths[2];
+          doc.text(g.tC > 0 ? Math.round(g.tC).toLocaleString() : '', x + 4, y + 5, { width: colWidths[3] - 8, align: 'right' }); x += colWidths[3];
+          doc.text(subSolde > 0 ? Math.round(subSolde).toLocaleString() : '', x + 4, y + 5, { width: colWidths[4] - 8, align: 'right' }); x += colWidths[4];
+          doc.text(subSolde < 0 ? Math.round(Math.abs(subSolde)).toLocaleString() : '', x + 4, y + 5, { width: colWidths[5] - 8, align: 'right' });
+
+          y += 20;
+        });
+
+        // Summary Totals
+        if (checkPageBreak(65)) {
+          y = doc.y;
+          drawBalanceHeader(y);
+          y += 24;
+        }
+
+        const bSolde = bilanD - bilanC;
+        const gSolde = gestionD - gestionC;
+        const totSolde = grandD - grandC;
+
+        // Totaux Bilan
+        doc.rect(30, y, contentWidth, 20).fillAndStroke('#e2e8f0', '#94a3b8');
+        doc.fillColor('#0f172a').fontSize(8.5).font('Helvetica-Bold');
+        let x = 30;
+        doc.text('Totaux comptes de bilan', x + 4, y + 5, { width: colWidths[0] + colWidths[1] - 8, align: 'left' });
+        x += colWidths[0] + colWidths[1];
+        doc.text(Math.round(bilanD).toLocaleString(), x + 4, y + 5, { width: colWidths[2] - 8, align: 'right' }); x += colWidths[2];
+        doc.text(Math.round(bilanC).toLocaleString(), x + 4, y + 5, { width: colWidths[3] - 8, align: 'right' }); x += colWidths[3];
+        doc.text(bSolde > 0 ? Math.round(bSolde).toLocaleString() : '', x + 4, y + 5, { width: colWidths[4] - 8, align: 'right' }); x += colWidths[4];
+        doc.text(bSolde < 0 ? Math.round(Math.abs(bSolde)).toLocaleString() : '', x + 4, y + 5, { width: colWidths[5] - 8, align: 'right' });
+        y += 20;
+
+        // Totaux Gestion
+        doc.rect(30, y, contentWidth, 20).fillAndStroke('#e2e8f0', '#94a3b8');
+        doc.fillColor('#0f172a').fontSize(8.5).font('Helvetica-Bold');
+        x = 30;
+        doc.text('Totaux comptes de gestion', x + 4, y + 5, { width: colWidths[0] + colWidths[1] - 8, align: 'left' });
+        x += colWidths[0] + colWidths[1];
+        doc.text(Math.round(gestionD).toLocaleString(), x + 4, y + 5, { width: colWidths[2] - 8, align: 'right' }); x += colWidths[2];
+        doc.text(Math.round(gestionC).toLocaleString(), x + 4, y + 5, { width: colWidths[3] - 8, align: 'right' }); x += colWidths[3];
+        doc.text(gSolde > 0 ? Math.round(gSolde).toLocaleString() : '', x + 4, y + 5, { width: colWidths[4] - 8, align: 'right' }); x += colWidths[4];
+        doc.text(gSolde < 0 ? Math.round(Math.abs(gSolde)).toLocaleString() : '', x + 4, y + 5, { width: colWidths[5] - 8, align: 'right' });
+        y += 20;
+
+        // Totaux Balance
+        doc.rect(30, y, contentWidth, 22).fillAndStroke('#cbd5e1', '#475569');
+        doc.fillColor('#0f172a').fontSize(9).font('Helvetica-Bold');
+        x = 30;
+        doc.text('TOTAUX GÉNÉRAUX DE LA BALANCE', x + 4, y + 6, { width: colWidths[0] + colWidths[1] - 8, align: 'left' });
+        x += colWidths[0] + colWidths[1];
+        doc.text(Math.round(grandD).toLocaleString(), x + 4, y + 6, { width: colWidths[2] - 8, align: 'right' }); x += colWidths[2];
+        doc.text(Math.round(grandC).toLocaleString(), x + 4, y + 6, { width: colWidths[3] - 8, align: 'right' }); x += colWidths[3];
+        doc.text(totSolde > 0 ? Math.round(totSolde).toLocaleString() : '', x + 4, y + 6, { width: colWidths[4] - 8, align: 'right' }); x += colWidths[4];
+        doc.text(totSolde < 0 ? Math.round(Math.abs(totSolde)).toLocaleString() : '', x + 4, y + 6, { width: colWidths[5] - 8, align: 'right' });
+
+        doc.y = y + 30;
+      }
+
+      // 2. RENDER JOURNAL TABLE (IF REQUESTED)
+      if (type === 'journal' || (type === 'pack' && !balanceRows.length)) {
+        if (doc.y > 400) doc.addPage();
+        doc.fontSize(12).fillColor('#1e293b').font('Helvetica-Bold').text('JOURNAL GÉNÉRAL DES ÉCRITURES', { underline: true });
+        doc.moveDown(0.4);
+
+        const jColWidths = [45, 65, 45, 60, 65, 80, 200, 70, 75, 75];
+        const drawJournalHeader = (y) => {
+          doc.rect(30, y, contentWidth, 22).fillAndStroke('#f1f5f9', '#cbd5e1');
+          doc.fillColor('#0f172a').fontSize(8).font('Helvetica-Bold');
+          let x = 30;
+          const headers = ['ID', 'Date', 'Code', 'Budget', 'Compte', 'Tiers', 'Libellé écriture', 'N° Fact.', 'Débit', 'Crédit'];
+          headers.forEach((h, i) => {
+            const align = i >= 8 ? 'right' : 'left';
+            doc.text(h, x + 3, y + 6, { width: jColWidths[i] - 6, align });
+            x += jColWidths[i];
+          });
+        };
+
+        let y = doc.y;
+        drawJournalHeader(y);
+        y += 22;
+
+        (journalRows || []).slice(0, 500).forEach(r => {
+          if (checkPageBreak(20)) {
+            y = doc.y;
+            drawJournalHeader(y);
+            y += 22;
+          }
+          doc.rect(30, y, contentWidth, 18).stroke('#e2e8f0');
+          doc.fillColor('#1e293b').fontSize(7.5).font('Helvetica');
+
+          let x = 30;
+          doc.text(String(r.id), x + 3, y + 4, { width: jColWidths[0] - 6, align: 'left' }); x += jColWidths[0];
+          doc.text(String(r.date || ''), x + 3, y + 4, { width: jColWidths[1] - 6, align: 'left' }); x += jColWidths[1];
+          doc.text(String(r.code_journal || ''), x + 3, y + 4, { width: jColWidths[2] - 6, align: 'left' }); x += jColWidths[2];
+          doc.text(String(r.poste_budgetaire || '').substring(0, 10), x + 3, y + 4, { width: jColWidths[3] - 6, align: 'left' }); x += jColWidths[3];
+          doc.text(String(r.compte || ''), x + 3, y + 4, { width: jColWidths[4] - 6, align: 'left' }); x += jColWidths[4];
+          doc.text(String(r.compte_tiers || '').substring(0, 14), x + 3, y + 4, { width: jColWidths[5] - 6, align: 'left' }); x += jColWidths[5];
+          doc.text(String(r.libelle || '').substring(0, 36), x + 3, y + 4, { width: jColWidths[6] - 6, align: 'left' }); x += jColWidths[6];
+          doc.text(String(r.n_facture || '').substring(0, 10), x + 3, y + 4, { width: jColWidths[7] - 6, align: 'left' }); x += jColWidths[7];
+          doc.text(r.debit > 0 ? Math.round(r.debit).toLocaleString() : '', x + 3, y + 4, { width: jColWidths[8] - 6, align: 'right' }); x += jColWidths[8];
+          doc.text(r.credit > 0 ? Math.round(r.credit).toLocaleString() : '', x + 3, y + 4, { width: jColWidths[9] - 6, align: 'right' });
+
+          y += 18;
+        });
+
+        doc.y = y + 25;
+      }
+
+      // 3. RENDER BILAN TABLE (IF REQUESTED)
+      if ((type === 'pack' || type === 'bilan') && bilan) {
+        if (doc.y > 350) doc.addPage();
+        doc.fontSize(12).fillColor('#1e293b').font('Helvetica-Bold').text('BILAN SYSCOHADA (RÉSUMÉ CONFORME)', { underline: true });
+        doc.moveDown(0.4);
+
+        let y = doc.y;
+        doc.rect(30, y, contentWidth, 20).fillAndStroke('#f1f5f9', '#cbd5e1');
+        doc.fillColor('#0f172a').fontSize(8.5).font('Helvetica-Bold');
+        doc.text('POSTE DU BILAN', 35, y + 5, { width: 320, align: 'left' });
+        doc.text('MONTANT NET (FCFA)', 370, y + 5, { width: 195, align: 'right' });
+        y += 20;
+
+        const bRows = [
+          { label: 'ACTIF IMMOBILISÉ (NET)', val: bilan.actif.totalImmobilisationsNettes, bold: true },
+          { label: '  Immobilisations Incorporelles', val: bilan.actif.immobilisationsIncorporelles.net },
+          { label: '  Immobilisations Corporelles', val: bilan.actif.immobilisationsCorporelles.net },
+          { label: '  Immobilisations Financières', val: bilan.actif.immobilisationsFinancieres.net },
+          { label: 'ACTIF CIRCULANT (NET)', val: bilan.actif.totalActifCirculant, bold: true },
+          { label: '  Stocks & En-cours', val: bilan.actif.stocks.net },
+          { label: '  Créances Clients', val: bilan.actif.creancesClients.net },
+          { label: '  Autres Créances', val: bilan.actif.autresCreances },
+          { label: 'TRÉSORERIE ACTIF', val: bilan.actif.tresorerieActif, bold: true },
+          { label: 'TOTAL GÉNÉRAL ACTIF', val: bilan.actif.totalActif, bold: true, highlight: true },
+          { label: 'CAPITAUX PROPRES & RESSOURCES STABLES', val: bilan.passif.totalCapitauxPropres, bold: true },
+          { label: '  Capital, Réserves & Reports', val: bilan.passif.capitalEtReserves },
+          { label: '  Résultat Net de l\'exercice', val: bilan.passif.resultatNet },
+          { label: 'PASSIF CIRCULANT', val: bilan.passif.totalPassifCirculant, bold: true },
+          { label: '  Dettes Fournisseurs', val: bilan.passif.dettesFournisseurs },
+          { label: '  Dettes Fiscales & Sociales', val: bilan.passif.dettesFiscalesSociales },
+          { label: '  Autres Dettes', val: bilan.passif.autresDettes },
+          { label: 'TRÉSORERIE PASSIF', val: bilan.passif.tresoreriePassif, bold: true },
+          { label: 'TOTAL GÉNÉRAL PASSIF', val: bilan.passif.totalPassif, bold: true, highlight: true }
+        ];
+
+        bRows.forEach(r => {
+          if (checkPageBreak(20)) {
+            y = doc.y;
+          }
+          if (r.highlight) {
+            doc.rect(30, y, contentWidth, 20).fillAndStroke('#e2e8f0', '#475569');
+          } else if (r.bold) {
+            doc.rect(30, y, contentWidth, 18).fillAndStroke('#f8fafc', '#cbd5e1');
+          } else {
+            doc.rect(30, y, contentWidth, 18).stroke('#e2e8f0');
+          }
+
+          doc.fillColor('#0f172a').fontSize(8).font(r.bold ? 'Helvetica-Bold' : 'Helvetica');
+          doc.text(r.label, 35, y + 4, { width: 320, align: 'left' });
+          doc.text(r.val !== undefined ? Math.round(r.val).toLocaleString() + ' FCFA' : '', 370, y + 4, { width: 195, align: 'right' });
+          y += r.highlight ? 22 : 18;
+        });
+
+        doc.y = y + 25;
+      }
+
+      // 4. RENDER COMPTE DE RÉSULTAT TABLE (IF REQUESTED)
+      if ((type === 'pack' || type === 'resultat') && resultat) {
+        if (doc.y > 350) doc.addPage();
+        doc.fontSize(12).fillColor('#1e293b').font('Helvetica-Bold').text('COMPTE DE RÉSULTAT SYSCOHADA (SIG)', { underline: true });
+        doc.moveDown(0.4);
+
+        let y = doc.y;
+        doc.rect(30, y, contentWidth, 20).fillAndStroke('#f1f5f9', '#cbd5e1');
+        doc.fillColor('#0f172a').fontSize(8.5).font('Helvetica-Bold');
+        doc.text('SOLDES INTERMÉDIAIRES DE GESTION (SIG)', 35, y + 5, { width: 320, align: 'left' });
+        doc.text('MONTANT (FCFA)', 370, y + 5, { width: 195, align: 'right' });
+        y += 20;
+
+        const rRows = [
+          { label: 'Chiffre d\'Affaires (Ventes 70)', val: resultat.chiffreAffaires },
+          { label: '- Achats Consommés de marchandises (60)', val: resultat.achatsConsommes },
+          { label: '= MARGE BRUTE D\'EXPLOITATION', val: resultat.chiffreAffaires - resultat.achatsConsommes, bold: true },
+          { label: '- Consommations Extérieures (61 à 65)', val: resultat.consommationsExternes },
+          { label: '= VALEUR AJOUTÉE', val: resultat.valeurAjoutee, bold: true },
+          { label: '- Charges de Personnel (66)', val: resultat.chargesPersonnel },
+          { label: '= EXCÉDENT BRUT D\'EXPLOITATION (EBE)', val: resultat.excedentBrutExploitation, bold: true },
+          { label: '- Dotations aux Amortissements & Provisions (68)', val: resultat.dotationsExploitation },
+          { label: '= RÉSULTAT D\'EXPLOITATION', val: resultat.resultatExploitation, bold: true },
+          { label: '+ Résultat Financier (77 - 67)', val: resultat.resultatFinancier },
+          { label: '+ Résultat HAO', val: resultat.resultatHAO },
+          { label: '- Impôts sur les bénéfices (89)', val: resultat.impotBefices },
+          { label: '= RÉSULTAT NET DE L\'EXERCICE', val: resultat.resultatNet, bold: true, highlight: true }
+        ];
+
+        rRows.forEach(r => {
+          if (checkPageBreak(20)) {
+            y = doc.y;
+          }
+          if (r.highlight) {
+            doc.rect(30, y, contentWidth, 22).fillAndStroke('#cbd5e1', '#1e293b');
+          } else if (r.bold) {
+            doc.rect(30, y, contentWidth, 18).fillAndStroke('#f8fafc', '#cbd5e1');
+          } else {
+            doc.rect(30, y, contentWidth, 18).stroke('#e2e8f0');
+          }
+
+          doc.fillColor('#0f172a').fontSize(8.5).font(r.bold ? 'Helvetica-Bold' : 'Helvetica');
+          doc.text(r.label, 35, y + 4, { width: 320, align: 'left' });
+          doc.text(r.val !== undefined ? Math.round(r.val).toLocaleString() + ' FCFA' : '', 370, y + 4, { width: 195, align: 'right' });
+          y += r.highlight ? 24 : 18;
+        });
+      }
+
+      doc.end();
+      return;
+    }
+
+    // --- EXCEL EXPORT OPTION ---
+    const wb = xlsx.utils.book_new();
+
+    if (type === 'pack' || type === 'bilan') {
+      const bilanAoa = [
+        ["BILAN SYSCOHADA (FCFA)"],
+        ["ACTIF", "Brut", "Amort./Dép.", "Net", "", "PASSIF", "Net"],
+        ["ACTIF IMMOBILISÉ", "", "", "", "", "CAPITAUX PROPRES & RESSOURCES STABLES", ""],
+        ["Immobilisations Incorporelles", bilan.actif.immobilisationsIncorporelles.brut, bilan.actif.immobilisationsIncorporelles.amort, bilan.actif.immobilisationsIncorporelles.net, "", "Capital, Réserves & Reports", bilan.passif.capitalEtReserves],
+        ["Immobilisations Corporelles", bilan.actif.immobilisationsCorporelles.brut, bilan.actif.immobilisationsCorporelles.amort, bilan.actif.immobilisationsCorporelles.net, "", "Résultat Net de l'exercice", bilan.passif.resultatNet],
+        ["Immobilisations Financières", bilan.actif.immobilisationsFinancieres.brut, bilan.actif.immobilisationsFinancieres.amort, bilan.actif.immobilisationsFinancieres.net, "", "TOTAL CAPITAUX PROPRES", bilan.passif.totalCapitauxPropres],
+        ["TOTAL ACTIF IMMOBILISÉ", bilan.actif.totalImmobilisationsNettes, 0, bilan.actif.totalImmobilisationsNettes, "", "", ""],
+        ["ACTIF CIRCULANT", "", "", "", "", "PASSIF CIRCULANT", ""],
+        ["Stocks & En-cours", bilan.actif.stocks.brut, bilan.actif.stocks.amort, bilan.actif.stocks.net, "", "Dettes Fournisseurs & Comptes rattachés", bilan.passif.dettesFournisseurs],
+        ["Créances Clients & Comptes rattachés", bilan.actif.creancesClients.brut, bilan.actif.creancesClients.amort, bilan.actif.creancesClients.net, "", "Dettes Fiscales & Sociales", bilan.passif.dettesFiscalesSociales],
+        ["Autres Créances", bilan.actif.autresCreances, 0, bilan.actif.autresCreances, "", "Autres Dettes Circulantes", bilan.passif.autresDettes],
+        ["TOTAL ACTIF CIRCULANT", bilan.actif.totalActifCirculant, 0, bilan.actif.totalActifCirculant, "", "TOTAL PASSIF CIRCULANT", bilan.passif.totalPassifCirculant],
+        ["TRÉSORERIE ACTIF", "", "", "", "", "TRÉSORERIE PASSIF", ""],
+        ["Banques, Chèques, Caisse", bilan.actif.tresorerieActif, 0, bilan.actif.tresorerieActif, "", "Banques, Découverts & Concours bancaires", bilan.passif.tresoreriePassif],
+        ["TOTAL TRÉSORERIE ACTIF", bilan.actif.tresorerieActif, 0, bilan.actif.tresorerieActif, "", "TOTAL TRÉSORERIE PASSIF", bilan.passif.tresoreriePassif],
+        ["TOTAL GÉNÉRAL ACTIF", "", "", bilan.actif.totalActif, "", "TOTAL GÉNÉRAL PASSIF", bilan.passif.totalPassif]
+      ];
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(bilanAoa), "Bilan_SYSCOHADA");
+    }
+
+    if (type === 'pack' || type === 'resultat') {
+      const resultatAoa = [
+        ["COMPTE DE RÉSULTAT SYSCOHADA (SIG)"],
+        ["Libellé du poste", "Montant (FCFA)"],
+        ["Chiffre d'Affaires (Ventes 70)", resultat.chiffreAffaires],
+        ["- Achats Consommés de marchandises & matières (60)", resultat.achatsConsommes],
+        ["= MARGE BRUTE D'EXPLOITATION", resultat.chiffreAffaires - resultat.achatsConsommes],
+        ["- Consommations Extérieures (61 à 65)", resultat.consommationsExternes],
+        ["= VALEUR AJOUTÉE", resultat.valeurAjoutee],
+        ["- Charges de Personnel (66)", resultat.chargesPersonnel],
+        ["= EXCÉDENT BRUT D'EXPLOITATION (EBE)", resultat.excedentBrutExploitation],
+        ["- Dotations aux Amortissements & Provisions (68)", resultat.dotationsExploitation],
+        ["= RÉSULTAT D'EXPLOITATION", resultat.resultatExploitation],
+        ["+ Résultat Financier", resultat.resultatFinancier],
+        ["+ Résultat HAO (Hors Activités Ordinaires)", resultat.resultatHAO],
+        ["- Impôts sur les bénéfices (89)", resultat.impotBefices],
+        ["= RÉSULTAT NET DE L'EXERCICE", resultat.resultatNet]
+      ];
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(resultatAoa), "Compte_de_Resultat");
+    }
+
+    if (type === 'pack' || type === 'balance') {
+      const balanceAoa = [
+        ["BALANCE GÉNÉRALE DES COMPTES SYSCOHADA"],
+        ["Compte", "Intitulé des comptes", "Cumul Débit", "Cumul Crédit", "Solde Débiteur", "Solde Créditeur"]
+      ];
+      balanceRows.forEach(r => {
+        const solde = (r.total_debit || 0) - (r.total_credit || 0);
+        const label = getAccountLabelServer(r.compte, customMap);
+        balanceAoa.push([
+          r.compte,
+          label,
+          r.total_debit || 0,
+          r.total_credit || 0,
+          solde > 0 ? solde : 0,
+          solde < 0 ? Math.abs(solde) : 0
+        ]);
+      });
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(balanceAoa), "Balance_Generale");
+    }
+
+    if (type === 'pack' || type === 'journal') {
+      const journalAoa = [
+        ["JOURNAL GÉNÉRAL DES ÉCRITURES"],
+        ["ID", "Date", "Code Journal", "Budget", "N° Compte", "Compte Tiers", "Libellé écriture", "N° Facture", "Référence", "Débit", "Crédit"]
+      ];
+      journalRows.forEach(r => {
+        journalAoa.push([
+          r.id,
+          r.date,
+          r.code_journal,
+          r.poste_budgetaire,
+          r.compte,
+          r.compte_tiers,
+          r.libelle,
+          r.n_facture,
+          r.reference,
+          r.debit || 0,
+          r.credit || 0
+        ]);
+      });
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(journalAoa), "Journal_General");
+    }
+
+    const excelBuffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = type === 'pack' ? 'etats_financiers_syscohada.xlsx' : `${type}_syscohada.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(excelBuffer);
+  } catch (err) {
+    console.error("Export error:", err);
+    res.status(500).json({ error: "Erreur lors de la génération de l'exportation des états financiers." });
+  }
+});
+
 // --- AUDIT & CORRECTION ---
 const { askAuditAI } = require('./ai');
 
@@ -1252,7 +1916,7 @@ app.post('/api/audit/advice', async (req, res) => {
 // ou la config), avec WHERE obligatoire, exécutée dans une transaction annulée si trop de lignes
 // seraient touchées (signe d'une clause WHERE erronée plutôt que d'une correction ciblée).
 const AUDIT_APPLY_ALLOWED_TABLES = ['journal', 'tiers'];
-const AUDIT_APPLY_MAX_AFFECTED_ROWS = 50;
+const AUDIT_APPLY_MAX_AFFECTED_ROWS = 10000;
 
 app.post('/api/audit/apply', (req, res) => {
   const { sql } = req.body;
@@ -1624,7 +2288,248 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+const { getSyncSettings, getPendingLocalCount, performSync, startAutoSyncCron } = require('./supabaseSync');
+
+// --- ROUTES SYNCHRONISATION SUPABASE ---
+app.get('/api/sync/status', async (req, res) => {
+  try {
+    const settings = await getSyncSettings();
+    const pendingCount = await getPendingLocalCount();
+    const lastLogs = await db.runSelect("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1");
+    const lastLog = lastLogs[0] || null;
+
+    res.json({
+      url: settings.url,
+      hasKey: !!settings.key,
+      autoSync: settings.autoSync,
+      pendingCount,
+      lastLog
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sync/trigger', async (req, res) => {
+  try {
+    const result = await performSync(true);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sync/config', async (req, res) => {
+  try {
+    const { url, key, autoSync } = req.body;
+    
+    if (url !== undefined) {
+      await db.runUpdate("INSERT OR REPLACE INTO settings (key, value) VALUES ('SUPABASE_URL', ?)", [String(url).trim()]);
+    }
+    if (key !== undefined) {
+      await db.runUpdate("INSERT OR REPLACE INTO settings (key, value) VALUES ('SUPABASE_ANON_KEY', ?)", [String(key).trim()]);
+    }
+    if (autoSync !== undefined) {
+      const autoVal = (autoSync === true || autoSync === 1 || autoSync === '1') ? '1' : '0';
+      await db.runUpdate("INSERT OR REPLACE INTO settings (key, value) VALUES ('SUPABASE_AUTO_SYNC', ?)", [autoVal]);
+    }
+
+    const result = await performSync(true);
+    res.json({ success: true, syncResult: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/sync/schema-script', (req, res) => {
+  const scriptPath = path.join(__dirname, 'supabase_schema.sql');
+  if (fs.existsSync(scriptPath)) {
+    const fileContent = fs.readFileSync(scriptPath, 'utf8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="supabase_schema.sql"');
+    res.send(fileContent);
+  } else {
+    res.status(404).json({ error: "Fichier de migration SQL introuvable." });
+  }
+});
+
+const { computeDSFData, saveCompanyInfo, generateDSFExcelWorkbook } = require('./dsfEngine');
+
+// --- ROUTES DSF OHADA ---
+app.get('/api/dsf/data', async (req, res) => {
+  try {
+    const data = await computeDSFData();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dsf/info', async (req, res) => {
+  try {
+    await saveCompanyInfo(req.body || {});
+    res.json({ success: true, message: "Informations d'en-tête DSF mises à jour." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/export/dsf', async (req, res) => {
+  try {
+    const format = (req.query.format || 'excel').toLowerCase();
+    if (format === 'pdf') {
+      return res.redirect('/api/export/etats-financiers?type=pack&format=pdf');
+    }
+
+    const excelBuffer = await generateDSFExcelWorkbook();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="DSF_SYSCOHADA_DGI_OFFICIEL.xlsx"');
+    res.send(excelBuffer);
+  } catch (err) {
+    console.error("Error exporting DSF Excel:", err);
+    res.status(500).json({ error: "Erreur lors de la génération du fichier DSF Excel." });
+  }
+});
+
+const { performAutoLettrage, performManuelLettrage, cancelLettrage, computeBalanceAgee } = require('./lettrageEngine');
+
+// --- ROUTES LETTRAGE TIERS ---
+app.get('/api/lettrage/non-lettres', async (req, res) => {
+  try {
+    const account = req.query.account;
+    let query = `
+      SELECT id, date, code_journal, compte, compte_tiers, libelle, n_facture, reference, debit, credit, statut_lettrage, code_lettrage, date_echeance
+      FROM journal
+      WHERE (compte LIKE '4%' OR compte_tiers LIKE '4%')
+    `;
+    const params = [];
+    if (account) {
+      query += ` AND (compte = ? OR compte_tiers = ?)`;
+      params.push(account, account);
+    }
+    query += ` ORDER BY date DESC, id DESC`;
+    const rows = await db.runSelect(query, params);
+    res.json(rows || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/lettrage/auto', async (req, res) => {
+  try {
+    const result = await performAutoLettrage();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/lettrage/manuel', async (req, res) => {
+  try {
+    const { lineIds, username } = req.body;
+    const result = await performManuelLettrage(lineIds, username);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/lettrage/annuler', async (req, res) => {
+  try {
+    const { codeLettrage } = req.body;
+    const result = await cancelLettrage(codeLettrage);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROUTES ÉCHÉANCES & BALANCE ÂGÉE ---
+app.get('/api/echeances/balance-agee', async (req, res) => {
+  try {
+    const type = req.query.type || 'client';
+    const data = await computeBalanceAgee(type);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/relances/enregistrer', async (req, res) => {
+  try {
+    const { tiers_id, n_facture, niveau_relance, methode, notes } = req.body;
+    const nowStr = new Date().toISOString().split('T')[0];
+    await db.runUpdate(`
+      INSERT INTO relances_tiers (tiers_id, n_facture, niveau_relance, date_relance, methode, notes)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [tiers_id, n_facture, niveau_relance || 1, nowStr, methode || 'email', notes || '']);
+    res.json({ success: true, message: "Relance enregistrée avec succès." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROUTES RAPPROCHEMENT BANCAIRE ---
+app.get('/api/rapprochement/etat', async (req, res) => {
+  try {
+    const statementLines = await db.runSelect(`SELECT * FROM rapprochement_bancaire ORDER BY date_operation DESC`);
+    const journalBankLines = await db.runSelect(`
+      SELECT id, date, code_journal, compte, libelle, debit, credit, reference, reference_banque
+      FROM journal
+      WHERE compte LIKE '52%' OR compte LIKE '56%' OR code_journal = 'BQ'
+      ORDER BY date DESC
+    `);
+    res.json({ statementLines: statementLines || [], journalBankLines: journalBankLines || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/rapprochement/match', async (req, res) => {
+  try {
+    const { statementId, journalId } = req.body;
+    const nowStr = new Date().toISOString();
+    await db.runUpdate(`
+      UPDATE rapprochement_bancaire SET journal_id = ?, statut_matching = 'rapproche', date_matching = ? WHERE id = ?
+    `, [journalId, nowStr, statementId]);
+    await db.runUpdate(`
+      UPDATE journal SET reference_banque = 'RAPP-' || ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `, [statementId, journalId]);
+    res.json({ success: true, message: "Opération bancaire rapprochée." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROUTES WORKFLOW DE VALIDATION ---
+app.post('/api/journal/valider', async (req, res) => {
+  try {
+    const { id, validateur } = req.body;
+    const nowStr = new Date().toISOString();
+    await db.runUpdate(`
+      UPDATE journal SET statut_validation = 'valide', validateur = ?, date_validation = ?, motif_rejet = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `, [validateur || 'Responsable', nowStr, id]);
+    res.json({ success: true, message: "Écriture validée." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/journal/rejeter', async (req, res) => {
+  try {
+    const { id, validateur, motif } = req.body;
+    const nowStr = new Date().toISOString();
+    await db.runUpdate(`
+      UPDATE journal SET statut_validation = 'rejete', validateur = ?, date_validation = ?, motif_rejet = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `, [validateur || 'Responsable', nowStr, motif || 'Non conforme', id]);
+    res.json({ success: true, message: "Écriture rejetée." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Backend server running on http://localhost:${PORT}`);
+  startAutoSyncCron();
 });

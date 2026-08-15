@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
-import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, X } from 'lucide-react';
+import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, X, Download, RefreshCw } from 'lucide-react';
 import { getAccountLabel } from '../utils/ohadaPlan';
 
 export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
@@ -29,6 +29,65 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [memoryMatch, setMemoryMatch] = useState({});
   const [fetchError, setFetchError] = useState('');
   const [customAccounts, setCustomAccounts] = useState({});
+  const [balanceFilterCompte, setBalanceFilterCompte] = useState('');
+  const [balanceClassFilter, setBalanceClassFilter] = useState('');
+  const [journalCodes, setJournalCodes] = useState(['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR']);
+
+  // --- DSF OHADA STATES ---
+  const [dsfSubTab, setDsfSubTab] = useState('controls');
+  const [dsfData, setDsfData] = useState(null);
+  const [companyForm, setCompanyForm] = useState({});
+  const [savingDsfInfo, setSavingDsfInfo] = useState(false);
+
+  // --- LETTRAGE & ADVANCED STATES ---
+  const [lettrageSubTab, setLettrageSubTab] = useState('lettrage'); // 'lettrage' | 'agee'
+  const [lettrageEntries, setLettrageEntries] = useState([]);
+  const [selectedLettrageIds, setSelectedLettrageIds] = useState([]);
+  const [lettrageAccountFilter, setLettrageAccountFilter] = useState('');
+  const [lettrageMsg, setLettrageMsg] = useState(null);
+
+  const [balanceAgeeData, setBalanceAgeeData] = useState([]);
+  const [balanceAgeeType, setBalanceAgeeType] = useState('client');
+
+  const [statementLines, setStatementLines] = useState([]);
+  const [journalBankLines, setJournalBankLines] = useState([]);
+  const [rapprochementMsg, setRapprochementMsg] = useState(null);
+
+  const fetchDsfData = () => {
+    fetch('/api/dsf/data')
+      .then(res => res.json())
+      .then(data => {
+        setDsfData(data);
+        if (data.companyInfo) setCompanyForm(data.companyInfo);
+      })
+      .catch(e => console.error(e));
+  };
+
+  const fetchLettrageEntries = () => {
+    let url = '/api/lettrage/non-lettres';
+    if (lettrageAccountFilter) url += `?account=${encodeURIComponent(lettrageAccountFilter)}`;
+    fetch(url)
+      .then(res => res.json())
+      .then(data => setLettrageEntries(Array.isArray(data) ? data : []))
+      .catch(e => console.error(e));
+  };
+
+  const fetchBalanceAgee = () => {
+    fetch(`/api/echeances/balance-agee?type=${balanceAgeeType}`)
+      .then(res => res.json())
+      .then(data => setBalanceAgeeData(Array.isArray(data) ? data : []))
+      .catch(e => console.error(e));
+  };
+
+  const fetchRapprochement = () => {
+    fetch('/api/rapprochement/etat')
+      .then(res => res.json())
+      .then(data => {
+        setStatementLines(data.statementLines || []);
+        setJournalBankLines(data.journalBankLines || []);
+      })
+      .catch(e => console.error(e));
+  };
 
   useEffect(() => {
     fetch('/api/chart-of-accounts')
@@ -39,6 +98,17 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         setCustomAccounts(map);
       })
       .catch(e => console.error(e));
+
+    fetch('/api/journals-list')
+      .then(res => res.json())
+      .then(codes => {
+        if (Array.isArray(codes) && codes.length > 0) {
+          setJournalCodes(codes);
+        }
+      })
+      .catch(e => console.error(e));
+
+    fetchDsfData();
   }, []);
 
   const totalDebit = manualLines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0);
@@ -301,11 +371,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                       value={manualHeader.code_journal}
                       onChange={e => setManualHeader({...manualHeader, code_journal: e.target.value})}
                     >
-                      <option value="AC">AC - Achat</option>
-                      <option value="VE">VE - Vente</option>
-                      <option value="BQ">BQ - Banque</option>
-                      <option value="OD">OD - Opérations Diverses</option>
-                      <option value="CA">CA - Caisse</option>
+                      {journalCodes.map(code => (
+                        <option key={code} value={code}>
+                          {code} - {code === 'AC' ? 'Achat' : code === 'VE' ? 'Vente' : code === 'BQ' ? 'Banque' : code === 'OD' ? 'Opérations Diverses' : code === 'CA' ? 'Caisse' : code === 'CAISPR' ? 'Caisse Principale' : `Journal ${code}`}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   <div>
@@ -702,12 +772,28 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         );
 
       case 'balance': {
+        const getOhadaTitle = (compteStr) => {
+          return getAccountLabel(compteStr, customAccounts);
+        };
+
+        const searchCompte = balanceFilterCompte.trim().toLowerCase();
+        const rawRows = Array.isArray(data) ? data : [];
+        const filteredRows = rawRows.filter(row => {
+          const compteStr = String(row.compte || '');
+          const label = getOhadaTitle(compteStr).toLowerCase();
+          
+          const matchSearch = !searchCompte || compteStr.startsWith(searchCompte) || compteStr.includes(searchCompte) || label.includes(searchCompte);
+          const matchClass = !balanceClassFilter || compteStr.startsWith(balanceClassFilter);
+
+          return matchSearch && matchClass;
+        });
+
         const groups = {};
         let bilan_debit = 0, bilan_credit = 0;
         let gestion_debit = 0, gestion_credit = 0;
         let grand_debit = 0, grand_credit = 0;
 
-        (Array.isArray(data) ? data : []).forEach(row => {
+        filteredRows.forEach(row => {
           const compteStr = String(row.compte);
           const root = compteStr.substring(0, 2);
           if (!groups[root]) {
@@ -729,15 +815,75 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
           grand_credit += (row.total_credit || 0);
         });
 
-        const getOhadaTitle = (compteStr) => {
-          return getAccountLabel(compteStr, customAccounts);
-        };
-
         return (
           <div style={{ overflowX: 'auto', background: 'white', padding: '1rem', borderRadius: 'var(--radius-md)' }}>
-            <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
+            <div style={{ textAlign: 'center', marginBottom: '1rem' }}>
               <h2 style={{ margin: 0, color: 'var(--color-text-main)' }}>Balance des comptes</h2>
-              <p style={{ margin: '0.25rem 0', color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>Complète - Format Sage 100</p>
+              <p style={{ margin: '0.25rem 0', color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>Complète - Format Sage 100 SYSCOHADA</p>
+            </div>
+
+            {/* BARRE DE FILTRAGE DE LA BALANCE PAR NUMÉRO DE COMPTE & CLASSE */}
+            <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: 'var(--radius-md)', marginBottom: '1.5rem', border: '1px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 260px', position: 'relative' }}>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--color-text-muted)' }}>
+                    🔍 Filtrer par N° de compte ou libellé :
+                  </label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="Ex: 401, 571, 604, Fournisseur..."
+                    value={balanceFilterCompte}
+                    onChange={e => setBalanceFilterCompte(e.target.value)}
+                    style={{ paddingRight: '2rem', width: '100%' }}
+                  />
+                  {balanceFilterCompte && (
+                    <button
+                      onClick={() => setBalanceFilterCompte('')}
+                      style={{ position: 'absolute', right: '0.5rem', top: '1.85rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', width: '100%', marginBottom: '0.25rem' }}>
+                    Filtrer par classe :
+                  </span>
+                  {[
+                    { id: '', label: 'Toutes' },
+                    { id: '1', label: 'Cl. 1 Capitaux' },
+                    { id: '2', label: 'Cl. 2 Immos' },
+                    { id: '3', label: 'Cl. 3 Stocks' },
+                    { id: '4', label: 'Cl. 4 Tiers' },
+                    { id: '5', label: 'Cl. 5 Trésorerie' },
+                    { id: '6', label: 'Cl. 6 Charges' },
+                    { id: '7', label: 'Cl. 7 Produits' },
+                  ].map(c => (
+                    <button
+                      key={c.id}
+                      onClick={() => setBalanceClassFilter(c.id)}
+                      className={`btn ${balanceClassFilter === c.id ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', borderRadius: '12px' }}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {(balanceFilterCompte || balanceClassFilter) && (
+                <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--color-border)', fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Résultats : <strong>{filteredRows.length}</strong> compte(s) affiché(s) sur {rawRows.length}</span>
+                  <button
+                    onClick={() => { setBalanceFilterCompte(''); setBalanceClassFilter(''); }}
+                    style={{ background: 'none', border: 'none', color: 'var(--color-error)', cursor: 'pointer', textDecoration: 'underline', fontSize: '0.8rem' }}
+                  >
+                    Effacer tous les filtres
+                  </button>
+                </div>
+              )}
             </div>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '900px', fontSize: '0.85rem' }}>
               <thead>
@@ -996,23 +1142,630 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
           </div>
         );
       }
+
+      case 'dsf': {
+        const handleSaveCompanyInfo = async (e) => {
+          e.preventDefault();
+          setSavingDsfInfo(true);
+          try {
+            await fetch('/api/dsf/info', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(companyForm)
+            });
+            fetchDsfData();
+          } catch (err) {
+            console.error(err);
+          } finally {
+            setSavingDsfInfo(false);
+          }
+        };
+
+        const tdrf = dsfData?.tdrf || {};
+        const tft = dsfData?.tft || {};
+        const controls = dsfData?.controls || [];
+
+        return (
+          <div style={{ background: 'white', padding: '1.25rem', borderRadius: 'var(--radius-md)' }}>
+            {/* Header DSF */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem' }}>
+              <div>
+                <h2 style={{ margin: 0, color: 'var(--color-primary-dark)', fontSize: '1.25rem', fontWeight: 700 }}>
+                  Déclaration Statistique et Fiscale (DSF SYSCOHADA)
+                </h2>
+                <p style={{ margin: '0.25rem 0 0 0', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  Conforme au SYSCOHADA Révisé 2017 & Décret N°2019/262 Cameroun (Plateforme HARMONY/FISCALIS DGI)
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <a
+                  href="/api/export/dsf?format=excel"
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)', borderColor: '#15803d', textDecoration: 'none', color: '#fff', fontSize: '0.85rem', fontWeight: 600 }}
+                >
+                  <Download size={16} /> 📦 Exporter DSF Officielle DGI (.xlsx)
+                </a>
+                <a
+                  href="/api/export/dsf?format=pdf"
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)', borderColor: '#b91c1c', textDecoration: 'none', color: '#fff', fontSize: '0.85rem', fontWeight: 600 }}
+                >
+                  <Download size={16} /> 📄 Exporter Dossier DSF (.pdf)
+                </a>
+              </div>
+            </div>
+
+            {/* Sub-tabs nav DSF */}
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', overflowX: 'auto', background: '#f8fafc', padding: '0.4rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <button className={`btn ${dsfSubTab === 'controls' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('controls')} style={{ fontSize: '0.8rem' }}>
+                ✅ Contrôles & Cohérence ({controls.filter(c => c.status === 'VALIDE').length}/{controls.length})
+              </button>
+              <button className={`btn ${dsfSubTab === 'info' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('info')} style={{ fontSize: '0.8rem' }}>
+                📋 En-tête & Renseignements R1/R2/R3
+              </button>
+              <button className={`btn ${dsfSubTab === 'tdrf' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('tdrf')} style={{ fontSize: '0.8rem' }}>
+                ⚖️ TDRF & Calcul de l'IS (33%)
+              </button>
+              <button className={`btn ${dsfSubTab === 'tft' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('tft')} style={{ fontSize: '0.8rem' }}>
+                🌊 Flux de Trésorerie (TFT)
+              </button>
+            </div>
+
+            {/* Sub-tab 1: CONTRÔLES BLOQUANTS */}
+            {dsfSubTab === 'controls' && (
+              <div>
+                <h4 style={{ marginBottom: '1rem', color: 'var(--color-text-main)' }}>Contrôles d'Équilibre et de Cohérence Inter-États (Bloquants DGI)</h4>
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  {controls.map(c => (
+                    <div key={c.id} style={{ padding: '1rem', borderRadius: 'var(--radius-md)', background: c.status === 'VALIDE' ? '#f0fdf4' : c.status === 'ERREUR' ? '#fef2f2' : '#fffbe5', border: `1px solid ${c.status === 'VALIDE' ? '#bbf7d0' : c.status === 'ERREUR' ? '#fecaca' : '#fef3c7'}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: '0.9rem', color: c.status === 'VALIDE' ? '#15803d' : c.status === 'ERREUR' ? '#b91c1c' : '#b45309' }}>
+                          [{c.id}] {c.libelle}
+                        </div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>{c.explication}</div>
+                      </div>
+                      <span style={{ padding: '0.25rem 0.65rem', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700, background: c.status === 'VALIDE' ? '#16a34a' : c.status === 'ERREUR' ? '#dc2626' : '#d97706', color: '#fff' }}>
+                        {c.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Sub-tab 2: PAGE DE GARDE & INFO */}
+            {dsfSubTab === 'info' && (
+              <form onSubmit={handleSaveCompanyInfo} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Numéro Identifiant Unique (NIU) *</label>
+                  <input type="text" className="input" value={companyForm.niu || ''} onChange={e => setCompanyForm({ ...companyForm, niu: e.target.value })} required />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Raison Sociale *</label>
+                  <input type="text" className="input" value={companyForm.raison_sociale || ''} onChange={e => setCompanyForm({ ...companyForm, raison_sociale: e.target.value })} required />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Centre Fiscal Competent</label>
+                  <select className="input" value={companyForm.centre_fiscal || ''} onChange={e => setCompanyForm({ ...companyForm, centre_fiscal: e.target.value })}>
+                    <option value="DGE Douala/Yaoundé">DGE - Direction des Grandes Entreprises</option>
+                    <option value="CIME Douala">CIME - Centre Impôts Moyennes Entreprises Douala</option>
+                    <option value="CIME Yaoundé">CIME - Centre Impôts Moyennes Entreprises Yaoundé</option>
+                    <option value="CDI Akwa">CDI - Centre Divisionnaire Akwa</option>
+                    <option value="CSIPLI">CSIPLI - Professions Libérales</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Régime Comptable</label>
+                  <select className="input" value={companyForm.regime || ''} onChange={e => setCompanyForm({ ...companyForm, regime: e.target.value })}>
+                    <option value="Système Normal (SN)">Système Normal (SN - CA ≥ 50M FCFA)</option>
+                    <option value="Système Minimal de Trésorerie (SMT)">Système Minimal de Trésorerie (SMT - CA &lt; 50M FCFA)</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Forme Juridique</label>
+                  <input type="text" className="input" value={companyForm.forme_juridique || ''} onChange={e => setCompanyForm({ ...companyForm, forme_juridique: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.2rem' }}>Nom du Signataire / Qualité</label>
+                  <input type="text" className="input" value={companyForm.signataire_nom || ''} onChange={e => setCompanyForm({ ...companyForm, signataire_nom: e.target.value })} />
+                </div>
+                <div style={{ gridColumn: '1 / -1', marginTop: '0.5rem' }}>
+                  <button type="submit" className="btn btn-primary" disabled={savingDsfInfo}>
+                    {savingDsfInfo ? 'Enregistrement...' : 'Enregistrer les informations de garde'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Sub-tab 3: TDRF & IS */}
+            {dsfSubTab === 'tdrf' && (
+              <div style={{ maxWidth: '650px' }}>
+                <h4 style={{ marginBottom: '1rem' }}>Tableau de Détermination du Résultat Fiscal (TDRF)</h4>
+                <div style={{ display: 'grid', gap: '0.5rem', fontSize: '0.85rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', background: '#f8fafc', borderRadius: '4px' }}>
+                    <span>Chiffre d'Affaires HT (Ventes 70)</span>
+                    <strong>{(tdrf.ca || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', background: '#f8fafc', borderRadius: '4px' }}>
+                    <span>Résultat comptable avant IS</span>
+                    <strong>{(tdrf.resultatComptableAvantIS || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', background: '#fffbe5', borderRadius: '4px' }}>
+                    <span>+ Réintégrations extra-comptables (Amendes, charges non déductibles)</span>
+                    <span>+{(tdrf.reintegrations || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', background: '#f0fdf4', borderRadius: '4px' }}>
+                    <span>- Déductions extra-comptables (Plus-values exonérées, dividendes)</span>
+                    <span>-{(tdrf.deductions || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#e2e8f0', borderRadius: '4px', fontWeight: 700 }}>
+                    <span>RÉSULTAT FISCAL IMPOSABLE</span>
+                    <span>{(tdrf.resultatFiscalImposable || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
+                    <span>IS Calculé (33% sur résultat fiscal)</span>
+                    <span>{(tdrf.isCalcule || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
+                    <span>Minimum de perception IS (1% du CA HT)</span>
+                    <span>{(tdrf.minimumPerceptionIS || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
+                    <span>IMPÔT SUR LES SOCIÉTÉS RETENU (IS)</span>
+                    <span>{(tdrf.isFinal || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#dcfce7', color: '#166534', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
+                    <span>RÉSULTAT NET DE L'EXERCICE APRÈS IS</span>
+                    <span>{(tdrf.resultatNetFinal || 0).toLocaleString()} FCFA</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Sub-tab 4: TFT */}
+            {dsfSubTab === 'tft' && (
+              <div style={{ maxWidth: '650px' }}>
+                <h4 style={{ marginBottom: '1rem' }}>Tableau des Flux de Trésorerie (TFT - Méthode Indirecte)</h4>
+                <div style={{ display: 'grid', gap: '0.5rem', fontSize: '0.85rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f8fafc', borderRadius: '4px' }}>
+                    <span>Flux de trésorerie provenant des activités d'exploitation (CAF)</span>
+                    <strong>{(tft.fluxExploitation || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f8fafc', borderRadius: '4px' }}>
+                    <span>Flux de trésorerie provenant des activités d'investissement</span>
+                    <strong>{(tft.fluxInvestissement || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f8fafc', borderRadius: '4px' }}>
+                    <span>Flux de trésorerie provenant des activités de financement</span>
+                    <strong>{(tft.fluxFinancement || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#cbd5e1', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
+                    <span>VARIATION NETTE DE LA TRÉSORERIE DE L'EXERCICE</span>
+                    <span>{(tft.variationTrésorerieNette || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f1f5f9', borderRadius: '4px' }}>
+                    <span>Trésorerie Nette au Bilan (Disponibilités − Concours bancaires)</span>
+                    <strong>{(tft.tresorerieNetBilan || 0).toLocaleString()} FCFA</strong>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case 'lettrage': {
+        const handleAutoLettrage = async () => {
+          try {
+            const res = await fetch('/api/lettrage/auto', { method: 'POST' });
+            const data = await res.json();
+            setLettrageMsg(data.message);
+            fetchLettrageEntries();
+          } catch (e) {
+            console.error(e);
+          }
+        };
+
+        const handleManuelLettrage = async () => {
+          if (selectedLettrageIds.length === 0) return;
+          try {
+            const res = await fetch('/api/lettrage/manuel', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lineIds: selectedLettrageIds, username: 'Comptable' })
+            });
+            const data = await res.json();
+            setLettrageMsg(data.message);
+            setSelectedLettrageIds([]);
+            fetchLettrageEntries();
+          } catch (e) {
+            console.error(e);
+          }
+        };
+
+        const handleCancelLettrage = async (code) => {
+          try {
+            const res = await fetch('/api/lettrage/annuler', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ codeLettrage: code })
+            });
+            const data = await res.json();
+            setLettrageMsg(data.message);
+            fetchLettrageEntries();
+          } catch (e) {
+            console.error(e);
+          }
+        };
+
+        const selectedEntries = lettrageEntries.filter(l => selectedLettrageIds.includes(l.id));
+        const sumDebit = selectedEntries.reduce((s, l) => s + (l.debit || 0), 0);
+        const sumCredit = selectedEntries.reduce((s, l) => s + (l.credit || 0), 0);
+        const ecartSel = Math.abs(sumDebit - sumCredit);
+
+        return (
+          <div style={{ background: 'white', padding: '1.25rem', borderRadius: 'var(--radius-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem' }}>
+              <div>
+                <h2 style={{ margin: 0, color: 'var(--color-primary-dark)', fontSize: '1.25rem', fontWeight: 700 }}>
+                  Lettrage & Échéances des Comptes Tiers (OHADA)
+                </h2>
+                <p style={{ margin: '0.25rem 0 0 0', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  Gestion du lettrage automatique/manuel, des règlements fractionnés et suivi de la balance âgée
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button className={`btn ${lettrageSubTab === 'lettrage' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setLettrageSubTab('lettrage'); fetchLettrageEntries(); }}>
+                  🔗 Lettrage Tiers
+                </button>
+                <button className={`btn ${lettrageSubTab === 'agee' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setLettrageSubTab('agee'); fetchBalanceAgee(); }}>
+                  📅 Balance Âgée & Relances
+                </button>
+              </div>
+            </div>
+
+            {lettrageMsg && (
+              <div style={{ padding: '0.75rem 1rem', borderRadius: 'var(--radius-md)', background: '#e0f2fe', color: '#0369a1', fontSize: '0.85rem', marginBottom: '1rem', fontWeight: 600 }}>
+                {lettrageMsg}
+              </div>
+            )}
+
+            {lettrageSubTab === 'lettrage' && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1rem', background: '#f8fafc', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Filtrer par Compte Tiers :</label>
+                    <input
+                      type="text"
+                      className="input"
+                      style={{ width: '160px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                      placeholder="Ex: 4111, 4011..."
+                      value={lettrageAccountFilter}
+                      onChange={e => setLettrageAccountFilter(e.target.value)}
+                    />
+                    <button className="btn btn-secondary" onClick={fetchLettrageEntries} style={{ padding: '0.25rem 0.6rem', fontSize: '0.8rem' }}>Filtrer</button>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <button className="btn btn-primary" onClick={handleAutoLettrage} style={{ background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)', fontSize: '0.85rem' }}>
+                      ⚡ Lettrage Automatique
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleManuelLettrage}
+                      disabled={selectedLettrageIds.length === 0}
+                      style={{ background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)', fontSize: '0.85rem' }}
+                    >
+                      🔗 Lettrer la Sélection ({selectedLettrageIds.length})
+                    </button>
+                  </div>
+                </div>
+
+                {selectedLettrageIds.length > 0 && (
+                  <div style={{ padding: '0.6rem 1rem', background: ecartSel < 0.01 ? '#f0fdf4' : '#fffbe5', borderRadius: 'var(--radius-md)', marginBottom: '1rem', border: `1px solid ${ecartSel < 0.01 ? '#bbf7d0' : '#fef3c7'}`, display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                    <span>Débit Sélectionné : <strong>{sumDebit.toLocaleString()} FCFA</strong> | Crédit Sélectionné : <strong>{sumCredit.toLocaleString()} FCFA</strong></span>
+                    <span style={{ fontWeight: 700, color: ecartSel < 0.01 ? '#15803d' : '#b45309' }}>
+                      Écart : {ecartSel.toLocaleString()} FCFA {ecartSel < 0.01 ? '(Prêt à solder)' : '(Lettrage partiel)'}
+                    </span>
+                  </div>
+                )}
+
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr style={{ background: '#f1f5f9', textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                        <th style={{ padding: '0.5rem' }}></th>
+                        <th style={{ padding: '0.5rem', textAlign: 'left' }}>Date</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'left' }}>Compte</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'left' }}>Facture / Réf</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'left' }}>Libellé</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'right' }}>Débit</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'right' }}>Crédit</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'center' }}>Statut</th>
+                        <th style={{ padding: '0.5rem', textAlign: 'center' }}>Code</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lettrageEntries.map(l => {
+                        const isChecked = selectedLettrageIds.includes(l.id);
+                        return (
+                          <tr
+                            key={l.id}
+                            style={{ borderBottom: '1px solid #e2e8f0', background: isChecked ? '#e0f2fe' : 'transparent', cursor: 'pointer' }}
+                            onClick={() => {
+                              setHighlightRowId(l.id);
+                              setActiveTab('journal');
+                            }}
+                            title="Cliquer pour afficher cette écriture en surbrillance dans le Journal"
+                          >
+                            <td style={{ padding: '0.5rem', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={e => {
+                                  if (e.target.checked) setSelectedLettrageIds([...selectedLettrageIds, l.id]);
+                                  else setSelectedLettrageIds(selectedLettrageIds.filter(id => id !== l.id));
+                                }}
+                              />
+                            </td>
+                            <td style={{ padding: '0.5rem' }}>{l.date}</td>
+                            <td style={{ padding: '0.5rem', fontWeight: 600 }}>{l.compte_tiers || l.compte}</td>
+                            <td style={{ padding: '0.5rem' }}>{l.n_facture || l.reference || '-'}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                                <span>{l.libelle}</span>
+                                <span style={{ fontSize: '0.7rem', color: '#2563eb', fontWeight: 600 }}>↗ Journal</span>
+                              </div>
+                            </td>
+                            <td style={{ padding: '0.5rem', textAlign: 'right', fontWeight: l.debit ? 600 : 400 }}>{l.debit ? l.debit.toLocaleString() : '-'}</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'right', fontWeight: l.credit ? 600 : 400 }}>{l.credit ? l.credit.toLocaleString() : '-'}</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'center' }}>
+                              <span style={{ padding: '0.2rem 0.5rem', borderRadius: '10px', fontSize: '0.7rem', fontWeight: 700, background: l.statut_lettrage === 'solde' ? '#16a34a' : l.statut_lettrage === 'partiel' ? '#d97706' : '#94a3b8', color: '#fff' }}>
+                                {l.statut_lettrage || 'non_lettre'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '0.5rem', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              {l.code_lettrage ? (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem' }}>
+                                  <strong style={{ color: '#1e40af', fontSize: '0.75rem' }}>{l.code_lettrage}</strong>
+                                  <button onClick={() => handleCancelLettrage(l.code_lettrage)} title="Annuler le lettrage" style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#dc2626', fontSize: '0.75rem', fontWeight: 'bold' }}>✕</button>
+                                </div>
+                              ) : '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {lettrageSubTab === 'agee' && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <h4>Balance Âgée Tiers</h4>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button className={`btn ${balanceAgeeType === 'client' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setBalanceAgeeType('client'); fetchBalanceAgee(); }}>
+                      Clients (Compte 411)
+                    </button>
+                    <button className={`btn ${balanceAgeeType === 'fournisseur' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setBalanceAgeeType('fournisseur'); fetchBalanceAgee(); }}>
+                      Fournisseurs (Compte 401)
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr style={{ background: '#f1f5f9', textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                        <th style={{ padding: '0.6rem', textAlign: 'left' }}>Compte / Nom du Tiers</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right' }}>Total Dû</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right' }}>Non Échu</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right', color: '#b45309' }}>1 - 30 Jours</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right', color: '#c2410c' }}>31 - 60 Jours</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right', color: '#b91c1c' }}>61 - 90 Jours</th>
+                        <th style={{ padding: '0.6rem', textAlign: 'right', color: '#7f1d1d' }}>+ 90 Jours</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {balanceAgeeData.map(t => (
+                        <tr key={t.compte} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                          <td style={{ padding: '0.6rem', fontWeight: 600 }}>{t.nom} ({t.compte})</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right', fontWeight: 700 }}>{t.totalDu.toLocaleString()} FCFA</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right' }}>{t.nonEchu.toLocaleString()} FCFA</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right', color: t.retard0_30 > 0 ? '#b45309' : undefined }}>{t.retard0_30.toLocaleString()} FCFA</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right', color: t.retard31_60 > 0 ? '#c2410c' : undefined }}>{t.retard31_60.toLocaleString()} FCFA</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right', color: t.retard61_90 > 0 ? '#b91c1c' : undefined }}>{t.retard61_90.toLocaleString()} FCFA</td>
+                          <td style={{ padding: '0.6rem', textAlign: 'right', fontWeight: t.retard90Plus > 0 ? 700 : 400, color: t.retard90Plus > 0 ? '#7f1d1d' : undefined }}>{t.retard90Plus.toLocaleString()} FCFA</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case 'rapprochement': {
+        const handleMatchBank = async (statementId, journalId) => {
+          try {
+            const res = await fetch('/api/rapprochement/match', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ statementId, journalId })
+            });
+            const data = await res.json();
+            setRapprochementMsg(data.message);
+            fetchRapprochement();
+          } catch (e) {
+            console.error(e);
+          }
+        };
+
+        return (
+          <div style={{ background: 'white', padding: '1.25rem', borderRadius: 'var(--radius-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem' }}>
+              <div>
+                <h2 style={{ margin: 0, color: 'var(--color-primary-dark)', fontSize: '1.25rem', fontWeight: 700 }}>
+                  Rapprochement Bancaire (Compte 52 / 56)
+                </h2>
+                <p style={{ margin: '0.25rem 0 0 0', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  Concordance entre le relevé bancaire réel et les écritures du journal de banque
+                </p>
+              </div>
+
+              <button className="btn btn-secondary" onClick={fetchRapprochement} style={{ fontSize: '0.85rem' }}>
+                <RefreshCw size={14} /> Actualiser l'état
+              </button>
+            </div>
+
+            {rapprochementMsg && (
+              <div style={{ padding: '0.75rem 1rem', borderRadius: 'var(--radius-md)', background: '#f0fdf4', color: '#15803d', fontSize: '0.85rem', marginBottom: '1rem', fontWeight: 600 }}>
+                {rapprochementMsg}
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+              {/* Colonne 1: Relevé de Banque */}
+              <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1rem', background: '#f8fafc' }}>
+                <h4 style={{ margin: '0 0 1rem 0', color: '#1e3a8a' }}>📋 Relevé Bancaire (Banque)</h4>
+                {statementLines.length === 0 ? (
+                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Aucune ligne de relevé bancaire importée.</p>
+                ) : (
+                  <div style={{ display: 'grid', gap: '0.5rem', maxHeight: '400px', overflowY: 'auto' }}>
+                    {statementLines.map(s => (
+                      <div key={s.id} style={{ padding: '0.6rem', borderRadius: '4px', background: s.statut_matching === 'rapproche' ? '#dcfce7' : '#ffffff', border: '1px solid #cbd5e1', fontSize: '0.8rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
+                          <span>{s.date_operation}</span>
+                          <span style={{ color: s.credit > 0 ? '#16a34a' : '#dc2626' }}>
+                            {s.credit > 0 ? `+${s.credit.toLocaleString()}` : `-${s.debit.toLocaleString()}`} FCFA
+                          </span>
+                        </div>
+                        <div style={{ color: 'var(--color-text-muted)', margin: '0.2rem 0' }}>{s.libelle}</div>
+                        <div style={{ fontSize: '0.75rem', fontWeight: 700, color: s.statut_matching === 'rapproche' ? '#15803d' : '#b45309' }}>
+                          {s.statut_matching === 'rapproche' ? '✓ Rapproché' : 'En attente de matching'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Colonne 2: Journal de Banque 52 */}
+              <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1rem', background: '#f8fafc' }}>
+                <h4 style={{ margin: '0 0 1rem 0', color: '#15803d' }}>📚 Écritures Journal de Banque (Compte 52)</h4>
+                <div style={{ display: 'grid', gap: '0.5rem', maxHeight: '400px', overflowY: 'auto' }}>
+                  {journalBankLines.map(j => (
+                    <div key={j.id} style={{ padding: '0.6rem', borderRadius: '4px', background: j.reference_banque ? '#dcfce7' : '#ffffff', border: '1px solid #cbd5e1', fontSize: '0.8rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
+                        <span>{j.date} - {j.compte}</span>
+                        <span style={{ color: j.debit > 0 ? '#16a34a' : '#dc2626' }}>
+                          {j.debit > 0 ? `+${j.debit.toLocaleString()}` : `-${j.credit.toLocaleString()}`} FCFA
+                        </span>
+                      </div>
+                      <div style={{ color: 'var(--color-text-muted)', margin: '0.2rem 0' }}>{j.libelle}</div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.4rem' }}>
+                        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: j.reference_banque ? '#15803d' : '#b45309' }}>
+                          {j.reference_banque ? `✓ ${j.reference_banque}` : 'Non rapproché'}
+                        </span>
+                        {!j.reference_banque && statementLines.filter(s => s.statut_matching !== 'rapproche').length > 0 && (
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.15rem 0.4rem', fontSize: '0.7rem' }}
+                            onClick={() => {
+                              const unMatched = statementLines.find(s => s.statut_matching !== 'rapproche');
+                              if (unMatched) handleMatchBank(unMatched.id, j.id);
+                            }}
+                          >
+                            Matching auto
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
     }
+  };
+
+  const handleExport = (exportType, format = 'excel') => {
+    let url = `/api/export/etats-financiers?type=${exportType}&format=${format}`;
+    if (activeTab === 'balance') {
+      if (balanceFilterCompte) url += `&search=${encodeURIComponent(balanceFilterCompte)}`;
+      if (balanceClassFilter) url += `&classe=${encodeURIComponent(balanceClassFilter)}`;
+    }
+    window.location.href = url;
   };
 
   return (
     <div className="card">
-      <h3 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-        <Table style={{ color: 'var(--color-primary)' }} />
-        Comptabilité & États Financiers
-      </h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem' }}>
+        <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Table style={{ color: 'var(--color-primary)' }} />
+          Comptabilité & États Financiers
+        </h3>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-primary"
+            onClick={() => handleExport('pack', 'excel')}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)', borderColor: '#15803d', color: '#fff', fontWeight: 600, fontSize: '0.85rem' }}
+            title="Exporter l'ensemble des états financiers en Excel (.xlsx)"
+          >
+            <Download size={16} /> 📦 Pack Excel (.xlsx)
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => handleExport('pack', 'pdf')}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)', borderColor: '#b91c1c', color: '#fff', fontWeight: 600, fontSize: '0.85rem' }}
+            title="Exporter l'ensemble des états financiers en PDF (.pdf)"
+          >
+            <Download size={16} /> 📄 Pack PDF (.pdf)
+          </button>
+        </div>
+      </div>
 
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem', overflowX: 'auto' }}>
-        <button className={`btn ${activeTab === 'saisie' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('saisie')}>Saisie / Upload</button>
-        <button className={`btn ${activeTab === 'journal' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('journal')}>Journal</button>
-        <button className={`btn ${activeTab === 'grandlivre' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('grandlivre')}>Grand Livre</button>
-        <button className={`btn ${activeTab === 'balance' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('balance')}>Balance</button>
-        <button className={`btn ${activeTab === 'bilan' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('bilan')}>Bilan</button>
-        <button className={`btn ${activeTab === 'resultat' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('resultat')}>Compte de Résultat</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '2rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto' }}>
+          <button className={`btn ${activeTab === 'saisie' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('saisie')}>Saisie / Upload</button>
+          <button className={`btn ${activeTab === 'journal' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('journal')}>Journal</button>
+          <button className={`btn ${activeTab === 'grandlivre' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('grandlivre')}>Grand Livre</button>
+          <button className={`btn ${activeTab === 'balance' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('balance')}>Balance</button>
+          <button className={`btn ${activeTab === 'bilan' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('bilan')}>Bilan</button>
+          <button className={`btn ${activeTab === 'resultat' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('resultat')}>Compte de Résultat</button>
+          <button className={`btn ${activeTab === 'dsf' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('dsf')} style={{ background: activeTab === 'dsf' ? 'linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%)' : undefined, color: activeTab === 'dsf' ? '#fff' : undefined, fontWeight: 600 }}>📋 DSF OHADA</button>
+          <button className={`btn ${activeTab === 'lettrage' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setActiveTab('lettrage'); fetchLettrageEntries(); }}>🔗 Lettrage & Échéances</button>
+          <button className={`btn ${activeTab === 'rapprochement' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setActiveTab('rapprochement'); fetchRapprochement(); }}>🏦 Rapprochement Bancaire</button>
+        </div>
+
+        {activeTab !== 'saisie' && (
+          <div style={{ display: 'flex', gap: '0.4rem' }}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => handleExport(activeTab === 'grandlivre' ? 'journal' : activeTab, 'excel')}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}
+              title="Exporter l'onglet au format Excel (respecte les filtres actifs)"
+            >
+              <Download size={14} /> Exporter Excel
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => handleExport(activeTab === 'grandlivre' ? 'journal' : activeTab, 'pdf')}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', color: '#b91c1c', borderColor: '#fca5a5' }}
+              title="Exporter l'onglet au format PDF (respecte les filtres actifs)"
+            >
+              <Download size={14} /> Exporter PDF
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Suggestions issues du plan comptable de l'entreprise chargé en mémoire (voir

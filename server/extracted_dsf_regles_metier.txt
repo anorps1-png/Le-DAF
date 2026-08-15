@@ -1,0 +1,260 @@
+=== REGLES METIER DSF OHADA ===
+
+RÈGLES MÉTIER
+Déclaration Statistique et Fiscale (DSF)
+SYSCOHADA Révisé 2017 — Cameroun — Décret 2019/262
+Document de spécification pour implémentation applicative
+Version 1.0 — Août 2026
+1. CADRE RÉGLEMENTAIRE ET CHAMP D'APPLICATION
+1.1 Base légale
+Acte Uniforme OHADA relatif au Droit Comptable et à l'Information Financière (AUDCIF) — révisé en janvier 2017, entré en vigueur le 1er janvier 2018
+Décret N°2019/262 du 28 mai 2019 du Président de la République du Cameroun — rend obligatoire le SYSCOHADA Révisé pour les DSF
+Décret N°04/073 du 05 avril 2004 — modifié et complété par le décret 2019/262
+Loi de finances pour l'exercice 2019 — consacre l'entrée en vigueur du nouveau référentiel OHADA au Cameroun
+Code Général des Impôts (CGI) Cameroun — édition 2025
+1.2 Assujettissement — Qui produit une DSF ?
+[R-001] Obligation universelle — Toute entreprise immatriculée au Cameroun, soumise au régime fiscal du réel ou du simplifié, est tenue de produire une DSF au titre de chaque exercice comptable clôturé.
+[R-002] OBNL et associations — Les associations, ONG, fondations et organisations à but non lucratif ayant des activités lucratives sont également soumises à la DSF.
+[R-003] Cliniques et établissements de santé — Les établissements médicaux (cliniques, hôpitaux privés) sont assujettis à la DSF de droit commun, qu'ils soient exonérés de TVA ou non. L'exonération de TVA ne supprime pas l'obligation de DSF.
+[R-004] Secteurs spécifiques exclus du droit commun — Les banques (régies par le règlement COBAC) et les sociétés d'assurance (régies par le code CIMA) utilisent des formats DSF spécifiques distincts du format normal.
+1.3 Délais de dépôt par type de centre fiscal
+[R-005] Pénalité de retard — Toute DSF déposée après la date limite est sanctionnée d'une amende minimale de 250 000 FCFA. Des pénalités supplémentaires s'appliquent sur les droits dus selon le CGI.
+[R-006] Modalité de dépôt — Depuis 2021, le dépôt s'effectue exclusivement par voie électronique sur la plateforme FISCALIS/HARMONY de la DGI (www.impots.cm). Le dépôt physique est interdit pour les contribuables DGE, CIME et CDI.
+2. CLASSIFICATION DES ENTREPRISES ET FORMAT DSF
+2.1 Régimes comptables SYSCOHADA Révisé
+[R-007] Système Normal (SN) — Obligatoire pour les entreprises soumises au régime fiscal du réel dont le chiffre d'affaires annuel est supérieur ou égal à 50 000 000 FCFA. Format DSF : DSF Système Normal — fichier XLSX officiel DGI.
+[R-008] Système Minimal de Trésorerie (SMT) — Applicable aux entreprises soumises au régime fiscal simplifié dont le chiffre d'affaires est compris entre 10 000 000 et 50 000 000 FCFA. Format DSF : DSF SMT — fichier XLSX officiel DGI distinct.
+[R-009] Suppression du Système Allégé — Le SYSCOHADA Révisé 2017 supprime définitivement le système comptable allégé. Les DSF antérieures à 2019 en format allégé ne sont plus conformes.
+2.2 Règles de détermination du format applicable
+Critère principal : SI CA ≥ 50 000 000 FCFA → Système Normal (SN)
+Critère secondaire : SI 10 000 000 FCFA ≤ CA < 50 000 000 FCFA → SMT
+Hors champ DSF OHADA : SI CA < 10 000 000 FCFA → Impôt libératoire (pas de DSF OHADA)
+[R-010] Référence CA — Le chiffre d'affaires retenu est le CA hors taxes de l'exercice N clôturé (pas le CA prévisionnel N+1). Pour une clinique exonérée de TVA, le CA = total des recettes d'actes médicaux et services facturés.
+[R-011] Première année d'exploitation — En cas de création en cours d'exercice, le CA est annualisé pour déterminer le format applicable : CA annualisé = CA réalisé × (12 / nombre de mois d'activité).
+3. STRUCTURE DE LA DSF SYSTÈME NORMAL
+3.1 Composantes obligatoires — Système Normal
+[R-012] Page de garde — Informations générales obligatoires : NIU, raison sociale, forme juridique, adresse, secteur d'activité (code NACE/OHADA), exercice comptable (dates de début et de fin), centre fiscal compétent, nom et qualité du signataire.
+[R-013] État 1 — Bilan Actif — Tableau de l'actif au 31/12 de l'exercice. Colonnes : Brut, Amortissements/Dépréciations cumulés, Net N, Net N-1.
+[R-014] État 2 — Bilan Passif — Tableau du passif et des capitaux propres au 31/12. Colonnes : Net N, Net N-1.
+[R-015] État 3 — Compte de Résultat — Tableau des produits et charges de l'exercice. Colonnes : N, N-1.
+[R-016] État 4 — Tableau des Flux de Trésorerie (TFT) — Présentation des flux de trésorerie selon la méthode indirecte ou directe. Trois parties : flux d'exploitation, flux d'investissement, flux de financement.
+[R-017] État 5 — Notes Annexes — Ensemble de tableaux de détail obligatoires (voir section 5). Constituent une partie intégrante des états financiers au même titre que les quatre états précédents.
+[R-018] Tableau Fiscal 1 — TDRF — Tableau de Détermination du Résultat Fiscal. Passage du résultat comptable au résultat fiscal imposable par retraitements extra-comptables (réintégrations et déductions).
+[R-019] Tableau Fiscal 2 — Tableau des Immobilisations — État des mouvements des immobilisations et des amortissements au cours de l'exercice (acquisitions, cessions, dotations, reprises).
+[R-020] Annexes DGI spécifiques Cameroun — Tableaux complémentaires exigés par la DGI camerounaise : état des effectifs, état des salaires et charges sociales, état TVA (si redevable), état des créances et dettes par nature.
+3.2 Composantes — Système Minimal de Trésorerie (SMT)
+[R-021] Bilan SMT — Bilan simplifié : même structure que le SN mais nombre de postes réduit. Actif : immobilisations, stocks, créances, trésorerie. Passif : capitaux propres, dettes.
+[R-022] Compte de Résultat SMT — Compte de résultat simplifié. Codification des lignes différente du système normal — attention à ne pas confondre les deux référentiels.
+[R-023] Notes Annexes SMT — Notes annexes allégées selon l'Article 28 de l'AUDCIF. Tenues à partir d'une comptabilité de trésorerie (recettes/dépenses) et non d'une comptabilité d'engagement.
+[R-024] Pas de TFT obligatoire en SMT — Le Tableau des Flux de Trésorerie n'est pas exigé en système minimal de trésorerie.
+4. RÈGLES DE VALORISATION DU BILAN
+4.1 Actif — règles générales
+[R-025] Valeur brute — Toute immobilisation est inscrite à l'actif pour sa valeur d'entrée (coût d'acquisition ou de production). La valeur brute ne change pas sauf en cas de réévaluation légale.
+[R-026] Amortissements — Les amortissements sont cumulés depuis l'entrée du bien. Net = Brut − Amortissements cumulés. Jamais de valeur nette négative (si amort > brut, l'actif est sorti).
+[R-027] Dépréciations — Les dépréciations s'appliquent aux éléments d'actif circulant (créances douteuses, stocks obsolètes). Elles figurent en déduction sur la colonne Amortissements/Dépréciations.
+[R-028] Immobilisations incorporelles — Fonds commercial (compte 211), logiciels (compte 213), brevets (214), licences (215). Amortissables selon durée d'utilité sauf fonds commercial non amortissable en SYSCOHADA.
+[R-029] Immobilisations corporelles — Terrains (221/222) non amortissables. Bâtiments (231/232) : durée 20-50 ans. Matériel et outillage (24x) : durée 3-10 ans. Matériel informatique (246) : 3 ans. Matériel médical (244) : 5-10 ans.
+[R-030] Stocks — Valorisés au coût de revient ou à la valeur nette de réalisation si inférieure (principe de prudence). Méthodes autorisées : CMUP ou FIFO. La méthode LIFO est interdite en SYSCOHADA.
+[R-031] Créances clients — Les créances douteuses ou litigieuses donnent lieu à une provision pour dépréciation. Montant de la dépréciation = créance brute − valeur probable de recouvrement. Pour une clinique : créances CNPS, mutuelles et assurances à identifier séparément.
+[R-032] Trésorerie — Solde des comptes bancaires et de caisse au 31/12. Interdit d'avoir simultanément un solde bancaire débiteur en actif ET créditeur en passif pour le même compte bancaire (compensation interdite).
+4.2 Passif — règles générales
+[R-033] Capitaux propres — Capital social libéré + Réserves + Report à nouveau + Résultat net de l'exercice. Les capitaux propres peuvent être négatifs (situation nette négative à signaler en annexe).
+[R-034] Résultat net au passif — Le résultat net figure au passif en capitaux propres (bénéfice en positif, perte en négatif). Ce résultat doit être strictement égal au résultat net du compte de résultat.
+[R-035] Dettes financières — Emprunts bancaires à long terme (compte 16x). À distinguer des concours bancaires courants (compte 56x) qui figurent en trésorerie-passif.
+[R-036] Dettes fournisseurs — Dettes nées de l'acquisition de biens et services non encore réglées au 31/12. À rapprocher de la balance âgée fournisseurs.
+[R-037] Dettes fiscales et sociales — IS dû (447x), TVA collectée − TVA déductible (4431/4432), IRPP sur salaires (4421), cotisations CNPS dues (431x). Doivent être cohérentes avec les déclarations mensuelles DGI.
+[R-038] Provisions pour risques — Provisions réglementées (compte 15x) inscrites au passif. La constitution d'une provision est déductible fiscalement si le risque est probable et évaluable.
+4.3 Règles d'équilibre du bilan
+Règle fondamentale : TOTAL ACTIF NET = TOTAL PASSIF (capitaux propres + dettes)
+Vérification résultat : Résultat bilan (capitaux propres) = Résultat compte de résultat = Résultat TDRF avant IS
+[R-039] Contrôle d'équilibre obligatoire — Le total actif net doit strictement égaler le total passif. Tout écart, même de 1 FCFA, invalide la DSF. Ce contrôle doit être implémenté comme validation bloquante dans l'application.
+5. COMPTE DE RÉSULTAT — RÈGLES DE CONSTRUCTION
+5.1 Structure du compte de résultat — Système Normal
+Le compte de résultat SYSCOHADA est organisé en soldes intermédiaires de gestion successifs :
+5.2 Règles spécifiques clinique médicale (exonérée TVA)
+[R-040] Compte de produits principal — Les recettes d'actes médicaux et de consultations sont enregistrées au compte 704 (Prestations de services). Pas de compte de TVA collectée.
+[R-041] Pas de TVA sur les produits — La clinique exonérée de TVA n'enregistre ni TVA collectée ni TVA déductible sur ses achats courants. Les achats de médicaments et fournitures médicales sont TTC.
+[R-042] Créances CNPS — Les prestations facturées à la CNPS (soins aux assurés sociaux) sont enregistrées en débit du compte 4111-CNPS. Elles constituent des créances spécifiques à suivre et à justifier en annexe.
+[R-043] Créances mutuelles — Les prestations couvertes par les mutuelles et assurances privées sont enregistrées en débit du compte 4111-MUTUELLES. Même traitement que les créances CNPS.
+[R-044] Subventions reçues — Les subventions d'exploitation éventuelles sont enregistrées au compte 71. Les subventions d'investissement (compte 141-142) sont reprises progressivement en produits selon le rythme d'amortissement du bien subventionné.
+6. TABLEAU DES FLUX DE TRÉSORERIE (TFT)
+6.1 Structure — Méthode indirecte (recommandée SYSCOHADA)
+[R-045] Flux d'exploitation — Résultat net + Dotations aux amortissements − Reprises + Variation du BFR (stocks + créances − dettes exploitation). Le résultat de départ est après IS.
+[R-046] Variation du BFR — ΔBFR = ΔSTOCKS + ΔCRÉANCES CLIENTS − ΔDETTES FOURNISSEURS − ΔDETTES FISCALES/SOCIALES. Une augmentation du BFR est un emploi (signe −), une diminution est une ressource (signe +).
+[R-047] Flux d'investissement — Acquisitions d'immobilisations (−) + Cessions d'immobilisations (valeur nette comptable +) + Variation des immobilisations financières.
+[R-048] Flux de financement — Augmentation de capital (+) + Emprunts contractés (+) − Remboursements d'emprunts (−) − Dividendes versés (−).
+Contrôle TFT : Flux exploitation + Flux investissement + Flux financement = Variation trésorerie nette
+Vérification : Trésorerie nette N = Trésorerie nette N-1 + Variation trésorerie nette
+[R-049] Trésorerie nette — Trésorerie nette = Disponibilités actif (5x) − Concours bancaires courants passif (56x). Doit correspondre exactement aux soldes du bilan.
+7. NOTES ANNEXES — CONTENU OBLIGATOIRE
+7.1 Tableaux des immobilisations
+[R-050] Tableau des immobilisations brutes — Pour chaque catégorie d'immobilisation : Valeur brute début + Acquisitions + Réévaluations − Cessions/Mises hors service = Valeur brute fin.
+[R-051] Tableau des amortissements — Pour chaque catégorie : Amortissements cumulés début + Dotations exercice − Amortissements des cessions = Amortissements cumulés fin. La valeur nette fin = Brut fin − Amort cumulé fin.
+[R-052] Tableau des provisions — Provisions pour dépréciation d'actifs et provisions pour risques : Solde début + Dotations − Reprises = Solde fin. Distinguer provisions réglementées et provisions pour dépréciation.
+7.2 État des créances et dettes
+[R-053] Ventilation des créances par échéance — Créances à moins d'un an / à plus d'un an. Pour une clinique : ventiler par débiteur (patients particuliers, CNPS, mutuelles, autres tiers).
+[R-054] Ventilation des dettes par nature — Dettes fournisseurs / dettes fiscales / dettes sociales / emprunts / autres dettes. Indication de l'échéance (court terme vs long terme).
+[R-055] Créances douteuses — État nominatif des créances faisant l'objet d'une provision pour dépréciation : nom du débiteur, montant brut, provision, motif.
+7.3 État des effectifs et de la masse salariale
+[R-056] Effectifs — Nombre de salariés au 31/12 et effectif moyen de l'exercice. Ventilation : cadres / agents de maîtrise / employés. Pour une clinique : médecins / personnel paramédical / personnel administratif.
+[R-057] Masse salariale — Total des salaires bruts versés dans l'exercice (compte 661). Total des charges patronales CNPS (compte 664). Ratio masse salariale/VA à calculer.
+7.4 Méthodes comptables et principes retenus
+[R-058] Déclaration des méthodes — L'entreprise doit déclarer en annexe : méthode de valorisation des stocks (CMUP ou FIFO), méthodes et durées d'amortissement par catégorie d'actif, méthode de conversion des opérations en devises si applicable.
+[R-059] Changement de méthode — Tout changement de méthode comptable par rapport à l'exercice précédent doit être signalé, justifié et l'impact chiffré indiqué en annexe.
+8. TABLEAU DE DÉTERMINATION DU RÉSULTAT FISCAL (TDRF)
+8.1 Structure du TDRF
+Point de départ : Résultat comptable avant IS (État 3)
+Le TDRF procède à des retraitements extra-comptables pour passer du résultat comptable au résultat fiscal imposable :
+8.1.1 Réintégrations fiscales (charges non déductibles)
+Amendes et pénalités fiscales (jamais déductibles — CGI Cameroun)
+Charges personnelles de l'exploitant confondues avec charges professionnelles
+Rémunérations excessives des dirigeants (part excédant le plafond CGI)
+Dons et libéralités excédant 0,5% du CA HT
+Intérêts excédentaires sur comptes courants d'associés (taux plafond CEMAC)
+Charges de l'exercice comptabilisées mais se rapportant à des exercices antérieurs
+Provisions non admises fiscalement (provisions pour propre assureur, provisions générales sans base individuelle)
+Cotisations de retraite versées à des régimes non agréés
+8.1.2 Déductions fiscales (produits non imposables)
+Plus-values de cession exonérées (sous conditions de remploi CGI)
+Dividendes perçus de filiales (exonération des produits de participation — quote-part de 95%)
+Reprises de provisions antérieurement non admises fiscalement
+Subventions d'investissement reprises comptablement (déjà imposées lors de leur attribution)
+Résultat fiscal : Résultat comptable + Réintégrations − Déductions = Résultat fiscal imposable
+8.2 Calcul de l'IS — Cameroun 2025
+[R-060] Taux IS standard — Taux d'IS = 33% sur le bénéfice fiscal net imposable (taux en vigueur CGI 2025 Cameroun).
+[R-061] Minimum de perception IS — L'IS ne peut être inférieur à 1% du CA HT, même en cas de déficit ou de résultat fiscal nul (minimum de perception — CGI Cameroun).
+[R-062] Imputation des acomptes — Les acomptes provisionnels d'IS versés trimestriellement (comptes 4422) sont imputés sur l'IS de l'exercice. Solde IS dû = IS calculé − Acomptes versés.
+[R-063] Déficit reportable — Un déficit fiscal peut être reporté sur les 4 exercices suivants (report en avant uniquement — pas de carry-back en droit camerounais).
+[R-064] Clinique exonérée TVA — impact IS — L'exonération de TVA n'affecte pas le calcul de l'IS. Le résultat fiscal est déterminé normalement. Cependant, la TVA sur achats étant non récupérable, elle constitue une charge déductible (intégrée dans le coût de revient).
+9. RÈGLES DE CONTRÔLE ET COHÉRENCE INTER-ÉTATS
+9.1 Contrôles d'équilibre bloquants
+[R-065] [CTRL-01] Équilibre bilan — TOTAL ACTIF NET = TOTAL PASSIF. Tolérance : 0 FCFA. Contrôle BLOQUANT.
+[R-066] [CTRL-02] Cohérence résultat — Résultat net (compte de résultat) = Résultat net (bilan passif, capitaux propres). Tolérance : 0 FCFA. Contrôle BLOQUANT.
+[R-067] [CTRL-03] Cohérence trésorerie TFT — Trésorerie nette fin TFT = Trésorerie nette fin bilan (disponibilités actif − concours bancaires passif). Tolérance : 0 FCFA. Contrôle BLOQUANT.
+[R-068] [CTRL-04] Variation trésorerie TFT — Trésorerie fin = Trésorerie début + Flux exploitation + Flux investissement + Flux financement. Tolérance : 0 FCFA. Contrôle BLOQUANT.
+[R-069] [CTRL-05] Cohérence immobilisations — Valeur brute fin tableau des immobilisations = Valeur brute bilan actif immobilisé. Amortissements cumulés fin tableau = Amortissements cumulés bilan. Contrôle BLOQUANT.
+[R-070] [CTRL-06] Cohérence provisions — Solde final tableau des provisions = Dépréciation d'actifs bilan + Provisions pour risques bilan. Contrôle BLOQUANT.
+9.2 Contrôles de vraisemblance (avertissements)
+[R-071] [WARN-01] Capitaux propres négatifs — Si capitaux propres < 0 : avertissement — situation nette négative à mentionner en annexe et signaler aux associés.
+[R-072] [WARN-02] Résultat fiscal déficitaire — Si résultat fiscal < 0 : vérifier l'application du minimum de perception IS (1% CA HT).
+[R-073] [WARN-03] Dégradation du BFR — Si BFR N > BFR N-1 de plus de 30% : avertissement — risque de tension de trésorerie à commenter.
+[R-074] [WARN-04] Créances > 180 jours — Si créances clients > 180 jours sans provision : avertissement — risque d'irrécouvrabilité à analyser.
+[R-075] [WARN-05] Masse salariale > 50% VA — Si charges de personnel / VA > 50% : avertissement à signaler (seuil d'alerte standard analyse financière).
+[R-076] [WARN-06] Cohérence IS minimum — Si IS comptabilisé < 1% × CA HT : avertissement — vérifier l'application du minimum de perception.
+10. TRAVAUX PRÉLIMINAIRES — SÉQUENCE D'ÉLABORATION
+10.1 Workflow d'élaboration DSF dans l'application
+Séquence obligatoire avant toute génération des états financiers :
+10.2 Régularisations de fin d'exercice — règles SYSCOHADA
+[R-077] Charges constatées d'avance (CCA) — Compte 476. Charges enregistrées dans l'exercice N mais se rapportant à N+1. Débit 476 / Crédit compte de charge. Montant = part de la charge relevant de l'exercice suivant.
+[R-078] Produits constatés d'avance (PCA) — Compte 477. Produits encaissés en N mais se rapportant à N+1. Débit compte de produit / Crédit 477.
+[R-079] Charges à payer (CAP) — Comptes 408, 428, 438, 448. Charges ayant couru en N dont la facture n'est pas encore reçue. Débit compte de charge / Crédit 40x ou 44x ou 42x.
+[R-080] Produits à recevoir (PAR) — Comptes 418, 478. Produits acquis en N dont la facture n'est pas encore émise. Débit 41x ou 47x / Crédit compte de produit.
+[R-081] Contrepartie obligatoire — Toute écriture de régularisation doit être contre-passée à l'ouverture de l'exercice N+1 avant tout enregistrement de l'exercice N+1.
+11. MAPPING COMPTES SYSCOHADA → ÉTATS FINANCIERS
+11.1 Classes de comptes SYSCOHADA
+11.2 Comptes clés clinique médicale
+12. PROCÉDURE DE TÉLÉDÉCLARATION — HARMONY DGI
+12.1 Plateforme et format
+[R-082] Plateforme officielle — Télédéclaration DSF via FISCALIS/HARMONY : https://teledeclaration-dgi.cm/?d=DSF. Accès avec identifiants contribuable (NIU + mot de passe).
+[R-083] Format du fichier — Le fichier DSF doit être au format XLSX, conforme au modèle officiel DGI téléchargeable sur impots.cm. Tout autre format est rejeté par la plateforme.
+[R-084] Annexes obligatoires — Le dépôt des annexes est obligatoire. Sans annexes valides, le processus de soumission est interrompu par la plateforme.
+12.2 Séquence de télédéclaration
+1. Connexion sur HARMONY avec NIU + mot de passe
+2. Menu Traitement → DSF (télédéclaration) → Nouvelle DSF
+3. Sélection du type de DSF (Normal / SMT / Banque / Assurance)
+4. Téléchargement du fichier XLSX vierge DGI
+5. Remplissage du fichier XLSX offline
+6. Téléversement (upload) du fichier rempli sur la plateforme
+7. Remplissage manuel des 5 premières pages (informations générales) directement dans HARMONY
+8. Vérification des autres tableaux auto-calculés par la plateforme
+9. Jointure des annexes dans les formats définis par la DGI
+10. Soumission finale → génération de l'accusé de réception
+11. Téléchargement et archivage de l'accusé de réception (preuve légale de dépôt)
+[R-085] Accusé de réception — L'accusé de réception est le seul document légal prouvant le dépôt de la DSF. Il doit être archivé 10 ans minimum. Il indique la date et l'heure de soumission, le NIU, l'exercice déclaré et le type de DSF.
+13. SYNTHÈSE — RÈGLES CRITIQUES POUR L'APPLICATION
+Liste consolidée des règles implémentables immédiatement comme logique applicative :
+Document généré — Août 2026 | SYSCOHADA Révisé 2017 | Décret N°2019/262 | CGI Cameroun 2025
+
+=== TABLES ===
+
+--- TABLE 1 ---
+Centre fiscal | Contribuable concerné | Délai de dépôt
+DGE (Direction des Grandes Entreprises) | Grandes entreprises, CA > seuil DGE | 15 mars N+1
+CIME (Centres Impôts Moyennes Entreprises) | PME régime réel | 15 avril N+1
+CSI-EPA (Établissements Publics Administratifs) | EPA, fondations publiques | 15 avril N+1
+CSIPLI (Professions Libérales et Immobilier) | Médecins, avocats, notaires, cliniques libérales | 15 avril N+1
+CDI (Centres Divisionnaires des Impôts) | PME régime simplifié | 15 mai N+1
+
+--- TABLE 2 ---
+Solde Intermédiaire | Formule de calcul | Comptes SYSCOHADA
+Chiffre d'Affaires (CA) | Ventes de marchandises + Ventes de produits + Prestations de services | 701 + 702 + 704
+Marge Brute sur Marchandises | Ventes de marchandises − Achats de marchandises − Variation de stocks march. | 701 − (601 + Δ6031)
+Production de l'exercice | CA produits + Production stockée + Production immobilisée | 702 + 703 + 72
+Valeur Ajoutée (VA) | Marge brute + Production − Consommations externes | MB + PE − (60 hors 601 + 61 + 62)
+Excédent Brut d'Exploitation (EBE) | VA + Subventions d'exploitation − Impôts et taxes − Charges de personnel | VA + 71 − 64 − 66
+Résultat d'Exploitation (RE) | EBE + Autres produits d'exploitation − Autres charges − DAP + RAP | EBE + 75 − 65 − 68 + 78
+Résultat Financier (RF) | Produits financiers − Charges financières | 77 − 67
+Résultat des Activités Ordinaires (RAO) | RE + RF | RE + RF
+Résultat HAO | Produits HAO − Charges HAO | 84 − 85
+Résultat avant IS | RAO + Résultat HAO | RAO ± HAO
+Impôt sur les Sociétés (IS) | IS calculé (voir TDRF) | 891
+RÉSULTAT NET | Résultat avant IS − IS | Résultat avant IS − 891
+
+--- TABLE 3 ---
+Étape | Action | Données sources | Contrôle
+1 | Clôture de la saisie — vérification exhaustivité des pièces | Grand livre complet | Aucune pièce en attente
+2 | Révision des comptes — vérification sens et conformité | Balance avant inventaire | Comptes débiteurs/créditeurs dans le sens normal
+3 | Lettrage des tiers — clients et fournisseurs | Comptes 4x lettrables | Taux de lettrage > 90%
+4 | Inventaire extra-comptable — stocks et immobilisations | États physiques | Concordance physique/comptable
+5 | Calcul et enregistrement des amortissements | Tableau des immo | Toutes les immo actives ont une dotation
+6 | Calcul et enregistrement des provisions | Créances + risques | Provisions justifiées et documentées
+7 | Enregistrement des régularisations (CCA, CPA, PCA, AAR) | Contrats + factures | CCA ≠ 0 si charges payées d'avance
+8 | Balance définitive après travaux d'inventaire | Balance N | Débit = Crédit sur tous les comptes
+9 | Génération des états financiers | Balance définitive | Contrôles CTRL-01 à CTRL-06
+10 | Établissement du TDRF et calcul IS | CR + liste retraitem. | IS ≥ 1% × CA HT
+11 | Remplissage des annexes et tableaux DGI | États précédents | Cohérence avec les états financiers
+12 | Génération du fichier XLSX DGI + télédéclaration Harmony | DSF complète | Accusé de réception téléchargé
+
+--- TABLE 4 ---
+Classe | Intitulé | Destination dans la DSF
+1 | Comptes de ressources durables | Bilan Passif — Capitaux propres et dettes financières
+2 | Comptes d'actif immobilisé | Bilan Actif — Actif immobilisé (brut et amortissements)
+3 | Comptes de stocks | Bilan Actif — Actif circulant / CR — Variation de stocks
+4 | Comptes de tiers | Bilan Actif (créances) / Bilan Passif (dettes) / CR (charges/produits tiers)
+5 | Comptes de trésorerie | Bilan Actif — Trésorerie actif / Bilan Passif — Trésorerie passif
+6 | Comptes de charges | Compte de Résultat — Charges
+7 | Comptes de produits | Compte de Résultat — Produits
+8 | Comptes HAO | Compte de Résultat — Hors Activités Ordinaires
+9 | Comptes analytiques | Hors états financiers (usage interne uniquement)
+
+--- TABLE 5 ---
+Compte SYSCOHADA | Intitulé | Rubrique DSF
+704 | Prestations de services (actes médicaux) | CA — Produits
+4111-PATIENTS | Créances patients particuliers | Actif circulant — Créances
+4111-CNPS | Créances CNPS | Actif circulant — Créances
+4111-MUTUELLES | Créances mutuelles/assurances | Actif circulant — Créances
+244 | Matériel médical | Actif immobilisé — Immob. corporelles
+281 / 284 | Amortissements matériel médical | Actif immobilisé — Amortissements
+431 | Cotisations CNPS dues (patronal) | Passif — Dettes sociales
+447 | IS dû | Passif — Dettes fiscales
+664 | Charges sociales patronales CNPS | CR — Charges de personnel
+681 | DAP — Dotations aux amortissements | CR — DAP
+685 | Dotations aux provisions | CR — DAP
+891 | IS (charge) | CR — IS
+
+--- TABLE 6 ---
+ID | Règle | Type | Impact
+R-039 | Total Actif Net = Total Passif | CRITIQUE | Validation bloquante
+R-066 | Résultat CR = Résultat Bilan | CRITIQUE | Validation bloquante
+R-049 | Trésorerie TFT = Trésorerie Bilan | CRITIQUE | Validation bloquante
+R-069 | Tableau immo = Bilan actif immo | CRITIQUE | Validation bloquante
+R-061 | IS ≥ 1% × CA HT (minimum perception) | CRITIQUE | Calcul fiscal
+R-030 | Stocks : CMUP ou FIFO uniquement (pas LIFO) | CRITIQUE | Validation méthode
+R-007 | Système Normal si CA ≥ 50M FCFA | CRITIQUE | Sélection format
+R-008 | SMT si 10M ≤ CA < 50M FCFA | CRITIQUE | Sélection format
+R-041 | Clinique exonérée TVA : pas de TVA collectée | CRITIQUE | Logique fiscale
+R-064 | TVA non récupérable = charge déductible IS | CRITIQUE | Calcul IS
+R-005 | Pénalité min 250 000 FCFA si retard | CRITIQUE | Alerte calendrier
+R-081 | Contre-passation des régularisations à l'ouverture N+1 | CRITIQUE | Automatisme requis
+R-084 | Fichier XLSX format DGI officiel obligatoire | CRITIQUE | Export
+R-085 | Archiver accusé de réception 10 ans | CRITIQUE | GED
