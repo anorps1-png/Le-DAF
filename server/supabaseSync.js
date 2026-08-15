@@ -13,14 +13,18 @@ async function getSyncSettings() {
     const settings = {};
     (rows || []).forEach(r => { settings[r.key] = r.value; });
     
-    return {
-      url: (settings.SUPABASE_URL || '').trim(),
-      key: (settings.SUPABASE_ANON_KEY || '').trim(),
-      autoSync: (settings.SUPABASE_AUTO_SYNC ?? '1').trim() === '1'
-    };
+    const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+    const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const autoSync = (settings.SUPABASE_AUTO_SYNC ?? process.env.SUPABASE_AUTO_SYNC ?? '1').trim() === '1';
+
+    return { url, key, autoSync };
   } catch (err) {
     console.error('Error fetching Supabase settings:', err);
-    return { url: '', key: '', autoSync: true };
+    return {
+      url: (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim(),
+      key: (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim(),
+      autoSync: true
+    };
   }
 }
 
