@@ -1,7 +1,12 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-const dbPath = path.resolve(__dirname, 'agent-ohada.sqlite');
+const fs = require('fs');
+
+const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+const dbPath = isVercel
+  ? path.join('/tmp', 'agent-ohada.sqlite')
+  : path.resolve(__dirname, 'agent-ohada.sqlite');
 
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {

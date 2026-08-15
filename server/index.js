@@ -807,9 +807,10 @@ app.get('/api/journal', async (req, res) => {
   try {
     const { clause, params } = await getExerciceDateFilter();
     const rows = await db.runSelect(`SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY id DESC`, params);
-    res.json(rows);
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error fetching journal:', err);
+    res.json([]);
   }
 });
 

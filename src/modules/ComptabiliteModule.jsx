@@ -158,18 +158,19 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     setFetchError('');
     try {
       const res = await fetch(`/api/${endpoint}`);
-      const json = await res.json();
+      const text = await res.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (e) {
+        throw new Error("Erreur de communication avec le serveur (Vercel).");
+      }
       if (!res.ok) {
-        // Une réponse d'erreur du serveur n'a pas la forme attendue par l'onglet (tableau ou
-        // objet selon le cas) : ne jamais l'assigner à data, sous peine de faire planter le
-        // rendu (ex: data.forEach sur un objet {error: "..."}) et d'afficher une page blanche.
         throw new Error(json.error || `Erreur ${res.status}`);
       }
       setData(json);
     } catch (err) {
       console.error(err);
-      // Idem si le serveur est injoignable (hors ligne, backend arrêté...) : on efface les
-      // données de l'onglet précédent plutôt que de laisser une forme incompatible en mémoire.
       setData(null);
       setFetchError(err.message || 'Impossible de charger les données. Vérifiez que le serveur est démarré.');
     }
