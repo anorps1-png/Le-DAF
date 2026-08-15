@@ -281,6 +281,7 @@ function startAutoSyncCron() {
 
 module.exports = {
   getSyncSettings,
+  getSupabaseClient,
   getPendingLocalCount,
   performSync,
   startAutoSyncCron
