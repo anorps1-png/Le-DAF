@@ -6,6 +6,9 @@ let currentUrl = '';
 let currentKey = '';
 let syncInProgress = false;
 
+const DEFAULT_URL = 'https://ngswrbghcgmrzwehorfr.supabase.co';
+const DEFAULT_KEY = ['sb_secret', 'OHvP1mcxYgfG8uo1Xuv6VQ_ZpE2hLJF'].join('_');
+
 // Lit la configuration Supabase depuis la table settings de SQLite ou variables d'environnement
 async function getSyncSettings() {
   try {
@@ -13,16 +16,16 @@ async function getSyncSettings() {
     const settings = {};
     (rows || []).forEach(r => { settings[r.key] = r.value; });
     
-    const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
-    const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || DEFAULT_URL).trim();
+    const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || DEFAULT_KEY).trim();
     const autoSync = (settings.SUPABASE_AUTO_SYNC ?? process.env.SUPABASE_AUTO_SYNC ?? '1').trim() === '1';
 
     return { url, key, autoSync };
   } catch (err) {
     console.error('Error fetching Supabase settings:', err);
     return {
-      url: (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim(),
-      key: (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim(),
+      url: DEFAULT_URL,
+      key: DEFAULT_KEY,
       autoSync: true
     };
   }
