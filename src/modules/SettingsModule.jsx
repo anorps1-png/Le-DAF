@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download } from 'lucide-react';
+import { getSupabaseConfig, saveSupabaseConfig } from '../utils/supabaseClient';
 
 export const SettingsModule = () => {
   const [keys, setKeys] = useState({ 
@@ -34,23 +35,43 @@ export const SettingsModule = () => {
         OPENAI_BASE_URL: data.OPENAI_BASE_URL || '',
         OPENAI_MODEL: data.OPENAI_MODEL || '',
         DEFAULT_AI: data.DEFAULT_AI || 'gemini' 
-      }));
+      }))
+      .catch(e => console.error(e));
 
     fetchSyncStatus();
   }, []);
 
   const fetchSyncStatus = () => {
+    const localCfg = getSupabaseConfig();
+    if (localCfg.url) {
+      setSupabaseConfig({
+        url: localCfg.url,
+        key: localCfg.key ? '********' : '',
+        autoSync: localCfg.autoSync
+      });
+    }
+
     fetch('/api/sync/status')
       .then(res => res.json())
       .then(data => {
-        setSupabaseConfig({
-          url: data.url || '',
-          key: data.hasKey ? '********' : '',
-          autoSync: data.autoSync
-        });
+        if (data && data.url) {
+          setSupabaseConfig({
+            url: data.url || localCfg.url,
+            key: data.hasKey ? '********' : (localCfg.key ? '********' : ''),
+            autoSync: data.autoSync !== undefined ? data.autoSync : localCfg.autoSync
+          });
+        }
         setSyncStatus(data);
       })
-      .catch(e => console.error(e));
+      .catch(() => {
+        setSyncStatus({
+          url: localCfg.url,
+          hasKey: !!localCfg.key,
+          autoSync: localCfg.autoSync,
+          pendingCount: 0,
+          lastLog: { message: localCfg.url ? 'Connecté en mode direct Supabase Cloud' : 'Supabase non configuré', status: localCfg.url ? 'success' : 'info' }
+        });
+      });
   };
 
   const handleSaveAI = async () => {
@@ -64,19 +85,27 @@ export const SettingsModule = () => {
   };
 
   const handleSaveSupabase = async () => {
-    const payload = {
-      url: supabaseConfig.url,
-      autoSync: supabaseConfig.autoSync
-    };
-    if (supabaseConfig.key && !supabaseConfig.key.includes('***')) {
-      payload.key = supabaseConfig.key;
+    const localCfg = getSupabaseConfig();
+    const urlToSave = supabaseConfig.url;
+    const keyToSave = (supabaseConfig.key && !supabaseConfig.key.includes('***')) ? supabaseConfig.key : localCfg.key;
+    const autoSyncToSave = supabaseConfig.autoSync;
+
+    // Enregistrement direct dans le navigateur (support Vercel & Offline)
+    saveSupabaseConfig({ url: urlToSave, key: keyToSave, autoSync: autoSyncToSave });
+
+    try {
+      const payload = { url: urlToSave, autoSync: autoSyncToSave };
+      if (keyToSave) payload.key = keyToSave;
+
+      await fetch('/api/sync/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      console.warn("Serveur backend indisponible, configuration enregistrée localement:", e);
     }
 
-    await fetch('/api/sync/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
     setSavedSupabase(true);
     setTimeout(() => setSavedSupabase(false), 3000);
     fetchSyncStatus();

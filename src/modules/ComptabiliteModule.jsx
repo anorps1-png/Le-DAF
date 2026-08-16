@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
 import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, X, Download, RefreshCw } from 'lucide-react';
 import { getAccountLabel } from '../utils/ohadaPlan';
+import { fetchDirectSupabaseJournal, fetchDirectSupabaseTiers } from '../utils/supabaseClient';
 
 export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'saisie');
@@ -159,21 +160,43 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     try {
       const res = await fetch(`/api/${endpoint}`);
       const text = await res.text();
-      let json;
+      let json = null;
       try {
         json = JSON.parse(text);
-      } catch (e) {
-        throw new Error("Erreur de communication avec le serveur (Vercel).");
+      } catch (e) {}
+
+      if (res.ok && json) {
+        setData(json);
+        setLoading(false);
+        return;
       }
-      if (!res.ok) {
-        throw new Error(json.error || `Erreur ${res.status}`);
-      }
-      setData(json);
     } catch (err) {
-      console.error(err);
-      setData(null);
-      setFetchError(err.message || 'Impossible de charger les données. Vérifiez que le serveur est démarré.');
+      console.warn(`Fetch /api/${endpoint} failed, falling back to direct Supabase query:`, err);
     }
+
+    // Direct Supabase Browser Query Fallback for Vercel
+    try {
+      if (endpoint === 'journal') {
+        const directJournal = await fetchDirectSupabaseJournal();
+        if (directJournal) {
+          setData(directJournal);
+          setLoading(false);
+          return;
+        }
+      } else if (endpoint === 'tiers') {
+        const directTiers = await fetchDirectSupabaseTiers();
+        if (directTiers) {
+          setData(directTiers);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch (directErr) {
+      console.error("Direct Supabase query error:", directErr);
+    }
+
+    setData([]);
+    setFetchError('Impossible de charger les données. Vérifiez votre configuration Supabase dans les Paramètres.');
     setLoading(false);
   };
 
