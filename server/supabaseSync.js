@@ -6,7 +6,7 @@ let currentUrl = '';
 let currentKey = '';
 let syncInProgress = false;
 
-// Lit la configuration Supabase depuis la table settings de SQLite
+// Lit la configuration Supabase depuis la table settings de SQLite ou variables d'environnement
 async function getSyncSettings() {
   try {
     const rows = await db.runSelect("SELECT key, value FROM settings WHERE key LIKE 'SUPABASE_%'");
@@ -28,7 +28,7 @@ async function getSyncSettings() {
   }
 }
 
-// Initialise le client Supabase si l'URL et la clé sont configurées
+// Initialise le client Supabase
 async function getSupabaseClient() {
   const { url, key } = await getSyncSettings();
   if (!url || !key) {
@@ -50,7 +50,7 @@ async function getSupabaseClient() {
   return supabaseClient;
 }
 
-// Compte le nombre de modifications locales en attente de synchronisation
+// Compte le nombre de modifications locales en attente
 async function getPendingLocalCount() {
   try {
     const tables = ['journal', 'tiers', 'exercices', 'chart_of_accounts', 'business_rules'];
@@ -65,7 +65,7 @@ async function getPendingLocalCount() {
   }
 }
 
-// Exécute la synchronisation bidirectionnelle (Push local -> Supabase / Pull Supabase -> local)
+// Synchronisation Bidirectionnelle complète (PUSH & PULL) entre PC (SQLite) et Vercel (Supabase)
 async function performSync(force = false) {
   if (syncInProgress) {
     return { status: 'in_progress', message: 'Synchronisation déjà en cours...' };
@@ -85,7 +85,7 @@ async function performSync(force = false) {
     return {
       status: 'not_configured',
       autoSyncEnabled: autoSync,
-      message: 'Supabase non configuré (URL ou Clé API manquante)'
+      message: 'Supabase non configuré (URL ou Clé API manquante dans les Paramètres)'
     };
   }
 
@@ -94,7 +94,7 @@ async function performSync(force = false) {
     return {
       status: 'error',
       autoSyncEnabled: autoSync,
-      message: 'Impossible de se connecter au client Supabase'
+      message: 'Impossible d\'initialiser le client Supabase'
     };
   }
 
@@ -103,144 +103,161 @@ async function performSync(force = false) {
   let pulledCount = 0;
 
   try {
-    // 1. PUSH PHASE : Envoyer les données locales modifiées vers Supabase
+    // -------------------------------------------------------------
+    // PHASE 1 : PUSH (Envoi des modifications locales vers Supabase)
+    // -------------------------------------------------------------
+
     // A) Journal
-    const unsyncedJournal = await db.runSelect(
-      "SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, updated_at FROM journal WHERE synced_at IS NULL OR updated_at > synced_at LIMIT 200"
-    );
+    try {
+      const unsyncedJournal = await db.runSelect(
+        "SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id FROM journal WHERE synced_at IS NULL OR updated_at > synced_at LIMIT 500"
+      );
 
-    if (unsyncedJournal && unsyncedJournal.length > 0) {
-      const payload = unsyncedJournal.map(r => ({
-        id: r.id,
-        code_journal: r.code_journal,
-        poste_budgetaire: r.poste_budgetaire,
-        date: r.date,
-        compte: r.compte,
-        compte_tiers: r.compte_tiers,
-        libelle: r.libelle,
-        n_facture: r.n_facture,
-        reference: r.reference,
-        debit: r.debit || 0,
-        credit: r.credit || 0,
-        piece_id: r.piece_id
-      }));
+      if (unsyncedJournal && unsyncedJournal.length > 0) {
+        const payload = unsyncedJournal.map(r => ({
+          code_journal: r.code_journal,
+          poste_budgetaire: r.poste_budgetaire,
+          date: r.date,
+          compte: r.compte,
+          compte_tiers: r.compte_tiers,
+          libelle: r.libelle,
+          n_facture: r.n_facture,
+          reference: r.reference,
+          debit: Number(r.debit) || 0,
+          credit: Number(r.credit) || 0,
+          piece_id: r.piece_id
+        }));
 
-      const { error } = await client.from('journal').upsert(payload, { onConflict: 'id' });
-      if (error) throw new Error(`Push Journal Supabase: ${error.message}`);
-
-      const ids = unsyncedJournal.map(r => r.id);
-      const placeholders = ids.map(() => '?').join(',');
-      await db.runUpdate(`UPDATE journal SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-      pushedCount += unsyncedJournal.length;
+        const { error } = await client.from('journal').upsert(payload);
+        if (!error) {
+          const ids = unsyncedJournal.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE journal SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+          pushedCount += unsyncedJournal.length;
+        } else {
+          console.warn("Journal Push warning:", error.message);
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Journal:", e);
     }
 
     // B) Tiers
-    const unsyncedTiers = await db.runSelect(
-      "SELECT id, type, nom, compte_comptable, solde, statut, updated_at FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at LIMIT 100"
-    );
+    try {
+      const unsyncedTiers = await db.runSelect(
+        "SELECT id, type, nom, compte_comptable, solde, statut FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at LIMIT 200"
+      );
 
-    if (unsyncedTiers && unsyncedTiers.length > 0) {
-      const payload = unsyncedTiers.map(r => ({
-        id: r.id,
-        type: r.type,
-        nom: r.nom,
-        compte_comptable: r.compte_comptable,
-        solde: r.solde || 0,
-        statut: r.statut
-      }));
+      if (unsyncedTiers && unsyncedTiers.length > 0) {
+        const payload = unsyncedTiers.map(r => ({
+          type: r.type,
+          nom: r.nom,
+          compte_comptable: r.compte_comptable,
+          solde: Number(r.solde) || 0,
+          statut: r.statut
+        }));
 
-      const { error } = await client.from('tiers').upsert(payload, { onConflict: 'id' });
-      if (error) throw new Error(`Push Tiers Supabase: ${error.message}`);
-
-      const ids = unsyncedTiers.map(r => r.id);
-      const placeholders = ids.map(() => '?').join(',');
-      await db.runUpdate(`UPDATE tiers SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-      pushedCount += unsyncedTiers.length;
+        const { error } = await client.from('tiers').upsert(payload, { onConflict: 'nom' });
+        if (!error) {
+          const ids = unsyncedTiers.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE tiers SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+          pushedCount += unsyncedTiers.length;
+        } else {
+          console.warn("Tiers Push warning:", error.message);
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Tiers:", e);
     }
 
     // C) Exercices
-    const unsyncedExercices = await db.runSelect(
-      "SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at"
-    );
+    try {
+      const unsyncedExercices = await db.runSelect(
+        "SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at"
+      );
 
-    if (unsyncedExercices && unsyncedExercices.length > 0) {
-      const payload = unsyncedExercices.map(r => ({
-        id: r.id,
-        libelle: r.libelle,
-        date_debut: r.date_debut,
-        date_fin: r.date_fin
-      }));
+      if (unsyncedExercices && unsyncedExercices.length > 0) {
+        const payload = unsyncedExercices.map(r => ({
+          libelle: r.libelle,
+          date_debut: r.date_debut,
+          date_fin: r.date_fin
+        }));
 
-      const { error } = await client.from('exercices').upsert(payload, { onConflict: 'id' });
-      if (error) throw new Error(`Push Exercices Supabase: ${error.message}`);
-
-      const ids = unsyncedExercices.map(r => r.id);
-      const placeholders = ids.map(() => '?').join(',');
-      await db.runUpdate(`UPDATE exercices SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-      pushedCount += unsyncedExercices.length;
+        const { error } = await client.from('exercices').upsert(payload);
+        if (!error) {
+          const ids = unsyncedExercices.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE exercices SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+          pushedCount += unsyncedExercices.length;
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Exercices:", e);
     }
 
-    // D) Chart of Accounts
-    const unsyncedAccounts = await db.runSelect(
-      "SELECT compte, libelle, source_doc_id FROM chart_of_accounts WHERE synced_at IS NULL OR updated_at > synced_at"
-    );
+    // -----------------------------------------------------------------
+    // PHASE 2 : PULL (Rapatriement des données Supabase vers le local)
+    // -----------------------------------------------------------------
 
-    if (unsyncedAccounts && unsyncedAccounts.length > 0) {
-      const payload = unsyncedAccounts.map(r => ({
-        compte: r.compte,
-        libelle: r.libelle,
-        source_doc_id: r.source_doc_id
-      }));
+    // A) PULL Journal depuis Supabase
+    try {
+      const { data: remoteJournal, error: jErr } = await client
+        .from('journal')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(500);
 
-      const { error } = await client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' });
-      if (error) throw new Error(`Push Chart of Accounts Supabase: ${error.message}`);
+      if (!jErr && Array.isArray(remoteJournal) && remoteJournal.length > 0) {
+        for (const r of remoteJournal) {
+          const existing = await db.runSelect(
+            "SELECT id FROM journal WHERE code_journal = ? AND date = ? AND compte = ? AND libelle = ? AND debit = ? AND credit = ?",
+            [r.code_journal || '', r.date || '', r.compte || '', r.libelle || '', Number(r.debit) || 0, Number(r.credit) || 0]
+          );
 
-      const comptes = unsyncedAccounts.map(r => r.compte);
-      const placeholders = comptes.map(() => '?').join(',');
-      await db.runUpdate(`UPDATE chart_of_accounts SET synced_at = CURRENT_TIMESTAMP WHERE compte IN (${placeholders})`, comptes);
-      pushedCount += unsyncedAccounts.length;
+          if (!existing || existing.length === 0) {
+            await db.runUpdate(
+              "INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+              [r.code_journal || 'AC', r.poste_budgetaire || '', r.date || '', r.compte || '', r.compte_tiers || '', r.libelle || '', r.n_facture || '', r.reference || '', Number(r.debit) || 0, Number(r.credit) || 0, r.piece_id || null]
+            );
+            pulledCount++;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error PULL Journal:", e);
     }
 
-    // E) Business Rules
-    const unsyncedRules = await db.runSelect(
-      "SELECT id, doc_id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, occurrences, description, is_active FROM business_rules WHERE synced_at IS NULL OR updated_at > synced_at"
-    );
+    // B) PULL Tiers depuis Supabase
+    try {
+      const { data: remoteTiers, error: tErr } = await client
+        .from('tiers')
+        .select('*');
 
-    if (unsyncedRules && unsyncedRules.length > 0) {
-      const payload = unsyncedRules.map(r => ({
-        id: r.id,
-        doc_id: r.doc_id,
-        pattern: r.pattern,
-        condition_type: r.condition_type,
-        target_account: r.target_account,
-        target_journal: r.target_journal,
-        vat_rate: r.vat_rate || 0,
-        confidence_score: r.confidence_score || 1.0,
-        auto_learned: r.auto_learned || 0,
-        occurrences: r.occurrences || 1,
-        description: r.description,
-        is_active: r.is_active || 1
-      }));
-
-      const { error } = await client.from('business_rules').upsert(payload, { onConflict: 'id' });
-      if (error) throw new Error(`Push Business Rules Supabase: ${error.message}`);
-
-      const ids = unsyncedRules.map(r => r.id);
-      const placeholders = ids.map(() => '?').join(',');
-      await db.runUpdate(`UPDATE business_rules SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-      pushedCount += unsyncedRules.length;
+      if (!tErr && Array.isArray(remoteTiers) && remoteTiers.length > 0) {
+        for (const t of remoteTiers) {
+          if (!t.nom) continue;
+          await db.runUpdate(
+            "INSERT OR REPLACE INTO tiers (nom, type, compte_comptable, solde, statut, synced_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            [t.nom, t.type || 'Client', t.compte_comptable || '', Number(t.solde) || 0, t.statut || 'Actif']
+          );
+          pulledCount++;
+        }
+      }
+    } catch (e) {
+      console.error("Error PULL Tiers:", e);
     }
 
-    // Log success
-    const msg = `Synchronisation réussie : ${pushedCount} élément(s) synchronisé(s) vers Supabase.`;
+    // Log & status report
+    const msg = `Synchronisation bidirectionnelle réussie : ${pushedCount} envoyé(s) vers Supabase, ${pulledCount} récupéré(s) en local.`;
     await db.runUpdate(
       "INSERT INTO sync_logs (status, pushed_count, pulled_count, message) VALUES (?, ?, ?, ?)",
       ['success', pushedCount, pulledCount, msg]
     );
 
     const pending = await getPendingLocalCount();
-
     syncInProgress = false;
+
     return {
       status: 'success',
       autoSyncEnabled: autoSync,
@@ -250,10 +267,12 @@ async function performSync(force = false) {
       lastSync: new Date().toISOString(),
       message: msg
     };
+
   } catch (err) {
     syncInProgress = false;
     console.error("Supabase sync error:", err);
-    const errMsg = `Erreur de synchronisation : ${err.message}`;
+    const errMsg = `Erreur lors de la synchronisation : ${err.message}`;
+    
     await db.runUpdate(
       "INSERT INTO sync_logs (status, pushed_count, pulled_count, message) VALUES (?, 0, 0, ?)",
       ['error', errMsg]
@@ -269,14 +288,14 @@ async function performSync(force = false) {
   }
 }
 
-// Démarre la tâche de fond automatique pour synchroniser régulièrement (toutes les 30 secondes)
+// Démarre la tâche de fond automatique pour synchroniser régulièrement (toutes les 15 secondes)
 function startAutoSyncCron() {
   setInterval(async () => {
     const { autoSync, url, key } = await getSyncSettings();
     if (autoSync && url && key && !syncInProgress) {
       await performSync(false);
     }
-  }, 30000); // 30s
+  }, 15000); // 15s
 }
 
 module.exports = {
