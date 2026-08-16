@@ -60,7 +60,7 @@ export const getSupabaseClient = () => {
 // Requêtes directes vers Supabase depuis le navigateur
 export const fetchDirectSupabaseJournal = async () => {
   const client = getSupabaseClient();
-  if (!client) return null;
+  if (!client) return [];
   try {
     const { data, error } = await client
       .from('journal')
@@ -69,18 +69,18 @@ export const fetchDirectSupabaseJournal = async () => {
 
     if (error) {
       console.warn('Direct Supabase fetch journal warning:', error.message);
-      return null;
+      return [];
     }
     return data || [];
   } catch (e) {
     console.error('Direct Supabase fetch journal error:', e);
-    return null;
+    return [];
   }
 };
 
 export const fetchDirectSupabaseTiers = async () => {
   const client = getSupabaseClient();
-  if (!client) return null;
+  if (!client) return [];
   try {
     const { data, error } = await client
       .from('tiers')
@@ -89,12 +89,12 @@ export const fetchDirectSupabaseTiers = async () => {
 
     if (error) {
       console.warn('Direct Supabase fetch tiers warning:', error.message);
-      return null;
+      return [];
     }
     return data || [];
   } catch (e) {
     console.error('Direct Supabase fetch tiers error:', e);
-    return null;
+    return [];
   }
 };
 

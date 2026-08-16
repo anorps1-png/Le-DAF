@@ -165,8 +165,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         json = JSON.parse(text);
       } catch (e) {}
 
-      if (res.ok && json) {
-        setData(json);
+      if (res.ok && json !== null) {
+        setData(Array.isArray(json) ? json : (json.error ? [] : json));
         setLoading(false);
         return;
       }
@@ -178,25 +178,21 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     try {
       if (endpoint === 'journal') {
         const directJournal = await fetchDirectSupabaseJournal();
-        if (directJournal) {
-          setData(directJournal);
-          setLoading(false);
-          return;
-        }
+        setData(Array.isArray(directJournal) ? directJournal : []);
+        setLoading(false);
+        return;
       } else if (endpoint === 'tiers') {
         const directTiers = await fetchDirectSupabaseTiers();
-        if (directTiers) {
-          setData(directTiers);
-          setLoading(false);
-          return;
-        }
+        setData(Array.isArray(directTiers) ? directTiers : []);
+        setLoading(false);
+        return;
       }
     } catch (directErr) {
       console.error("Direct Supabase query error:", directErr);
     }
 
     setData([]);
-    setFetchError('Impossible de charger les données. Vérifiez votre configuration Supabase dans les Paramètres.');
+    setFetchError('');
     setLoading(false);
   };
 
