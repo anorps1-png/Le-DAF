@@ -572,8 +572,11 @@ Instructions :
               const PDFDocument = require('pdfkit');
               const doc = new PDFDocument({ margin: 50, size: 'A4' });
               
+              const isVercelEnv = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+              const exportsBaseDir = isVercelEnv ? path.join('/tmp', 'exports') : path.join(__dirname, 'public', 'exports');
+              try { if (!fs.existsSync(exportsBaseDir)) fs.mkdirSync(exportsBaseDir, { recursive: true }); } catch (e) {}
               const filename = args.filename || `rapport_${Date.now()}.pdf`;
-              const filePath = path.join(__dirname, 'public', 'exports', filename);
+              const filePath = path.join(exportsBaseDir, filename);
               const stream = fs.createWriteStream(filePath);
               
               doc.pipe(stream);

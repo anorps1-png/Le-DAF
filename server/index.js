@@ -29,11 +29,22 @@ app.use(async (req, res, next) => {
 });
 
 // Serve public/exports directory for generated files
-const exportsDir = path.join(__dirname, 'public', 'exports');
-if (!fs.existsSync(exportsDir)) {
-  fs.mkdirSync(exportsDir, { recursive: true });
+const isVercelServer = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+const exportsDir = isVercelServer
+  ? path.join('/tmp', 'exports')
+  : path.join(__dirname, 'public', 'exports');
+
+try {
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+} catch (e) {
+  // Ignorer si filesystem restreint
 }
 app.use('/public', express.static(path.join(__dirname, 'public')));
+if (isVercelServer) {
+  app.use('/public/exports', express.static(exportsDir));
+}
 
 const upload = multer({ storage: multer.memoryStorage() });
 
