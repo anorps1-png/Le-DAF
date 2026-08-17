@@ -44,17 +44,17 @@ Copy-Item (Join-Path $PSScriptRoot "stop.vbs") $stageDir -Force
 
 # Copie du serveur Express (sans les fichiers de test volumineux)
 $stageServer = Join-Path $stageDir "server"
-New-Item -ItemType Directory -Path $stageServer | Out-Null
+New-Item -ItemType Directory -Path $stageServer -Force | Out-Null
 
-Get-ChildItem -Path $serverDir -Exclude "agent-ohada.sqlite*", "test_*.js", "*.pdf", "*.xlsx" | ForEach-Object {
-    Copy-Item $_.FullName $stageServer -Recurse -Force
-}
+robocopy $serverDir $stageServer /E /XF "agent-ohada.sqlite*" "test_*.js" "*.pdf" "*.xlsx" /MT:16 /NP /NDL /NFL /NJH /NJS
+if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
 
 # 5. Résumé et Compilation Inno Setup
 Write-Host "`n[5/5] Compilation de l'installateur Windows AgentOHADA-Setup.exe..." -ForegroundColor Yellow
 
 $isccPaths = @(
-    "C:\Users\LA TCHAUX HOTEL\AppData\Local\Programs\Antigravity IDE\resources\app\node_modules\innosetup\bin\ISCC.exe",
+    (Join-Path $rootDir "node_modules\innosetup\bin\ISCC.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Antigravity IDE\resources\app\node_modules\innosetup\bin\ISCC.exe"),
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )

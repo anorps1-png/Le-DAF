@@ -41,6 +41,7 @@ try {
 } catch (e) {
   // Ignorer si filesystem restreint
 }
+app.use(express.static(path.join(__dirname, 'public')));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 if (isVercelServer) {
   app.use('/public/exports', express.static(exportsDir));
@@ -68,6 +69,56 @@ async function getExerciceDateFilter() {
   const ex = await getActiveExercice();
   if (!ex) return { clause: '', params: [] };
   return { clause: 'date >= ? AND date <= ?', params: [ex.date_debut, ex.date_fin] };
+}
+
+// Calcule, pour chaque compte ayant au moins une écriture, le solde antérieur (report des
+// écritures situées avant l'exercice actif), le mouvement de la période sélectionnée, et le
+// solde cumulé qui en résulte. C'est la structure même de la balance générale telle qu'elle
+// apparaît dans le Guide d'application SYSCOHADA (tableau "BALANCE N-1" : Solde N-2 / Mouvement
+// N-1 / Solde N-1) — le Journal, la Balance et le Grand Livre s'appuient tous sur ce calcul.
+//
+// Sans cette distinction, un compte resté sans écriture PENDANT l'exercice sélectionné (ex :
+// capital, emprunt ancien) mais dont le solde reporté est non nul disparaissait purement et
+// simplement de la Balance et du Grand Livre dès qu'un exercice était actif, alors que son solde
+// reste réel. Sans exercice actif, solde antérieur = 0 pour tous les comptes (rien à reporter) :
+// le comportement est alors strictement identique à l'ancien calcul.
+async function getBalanceRows() {
+  const ex = await getActiveExercice();
+
+  const [openingRows, periodRows, allTimeLabels] = await Promise.all([
+    ex
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date < ? GROUP BY compte`, [ex.date_debut])
+      : Promise.resolve([]),
+    ex
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? GROUP BY compte`, [ex.date_debut, ex.date_fin])
+      : db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal GROUP BY compte`),
+    db.runSelect(`SELECT compte, MAX(libelle) as intitule FROM journal GROUP BY compte`),
+  ]);
+
+  const labelByCompte = new Map(allTimeLabels.map(r => [r.compte, r.intitule]));
+  const byCompte = new Map();
+
+  openingRows.forEach(r => {
+    byCompte.set(r.compte, { compte: r.compte, solde_anterieur: (r.debit || 0) - (r.credit || 0), total_debit: 0, total_credit: 0 });
+  });
+  periodRows.forEach(r => {
+    const entry = byCompte.get(r.compte) || { compte: r.compte, solde_anterieur: 0, total_debit: 0, total_credit: 0 };
+    entry.total_debit = r.debit || 0;
+    entry.total_credit = r.credit || 0;
+    byCompte.set(r.compte, entry);
+  });
+
+  return Array.from(byCompte.values())
+    .map(e => ({
+      compte: e.compte,
+      intitule: labelByCompte.get(e.compte) || '',
+      solde_anterieur: e.solde_anterieur,
+      total_debit: e.total_debit,
+      total_credit: e.total_credit,
+      solde: e.total_debit - e.total_credit,
+      solde_cumule: e.solde_anterieur + (e.total_debit - e.total_credit),
+    }))
+    .sort((a, b) => a.compte.localeCompare(b.compte));
 }
 
 app.get('/api/exercices', (req, res) => {
@@ -881,41 +932,48 @@ app.delete('/api/journal/:id', async (req, res) => {
 // Liste des comptes ayant des écritures (exercice actif), pour le sélecteur du Grand Livre.
 app.get('/api/grand-livre/comptes', async (req, res) => {
   try {
-    const { clause, params } = await getExerciceDateFilter();
-    const rows = await db.runSelect(`
-      SELECT compte, (SUM(debit) - SUM(credit)) as solde
-      FROM journal
-      ${clause ? `WHERE ${clause}` : ''}
-      GROUP BY compte
-      ORDER BY compte ASC
-    `, params);
-    res.json(rows);
+    // Passe par getBalanceRows() (solde antérieur + mouvement) plutôt que par un simple filtre de
+    // période : un compte resté sans écriture pendant l'exercice actif, mais dont le solde reporté
+    // est non nul, doit rester sélectionnable pour consulter son Grand Livre.
+    const rows = await getBalanceRows();
+    res.json(rows.map(r => ({ compte: r.compte, solde: r.solde_cumule })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Écritures d'un compte, triées chronologiquement, avec solde progressif cumulé (SUM des lignes
-// précédentes du même compte) — c'est la définition même d'un Grand Livre.
+// Écritures d'un compte, triées chronologiquement, avec solde progressif cumulé (solde
+// d'ouverture reporté des exercices antérieurs + SUM des lignes précédentes du même compte dans
+// la période) — c'est la définition même d'un Grand Livre. Sans ce report, le solde progressif
+// repartait de zéro à chaque changement d'exercice, ce qui ne reflète pas le solde réel du compte.
 app.get('/api/grand-livre/:compte', async (req, res) => {
   try {
     const { compte } = req.params;
-    const { clause, params } = await getExerciceDateFilter();
-    const exFilter = clause ? `AND ${clause}` : '';
-    const rows = await db.runSelect(`
-      SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
-      FROM journal
-      WHERE compte = ? ${exFilter}
-      ORDER BY date ASC, id ASC
-    `, [compte, ...params]);
+    const ex = await getActiveExercice();
+    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
+    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
 
-    let solde = 0;
+    const [openingRows, rows] = await Promise.all([
+      ex
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE compte = ? AND date < ?`, [compte, ex.date_debut])
+        : Promise.resolve([{ debit: 0, credit: 0 }]),
+      db.runSelect(`
+        SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
+        FROM journal
+        WHERE compte = ? ${exFilter}
+        ORDER BY date ASC, id ASC
+      `, [compte, ...exParams]),
+    ]);
+
+    const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
+
+    let solde = soldeOuverture;
     const lignes = rows.map(r => {
       solde += (r.debit || 0) - (r.credit || 0);
       return { ...r, solde_progressif: solde };
     });
 
-    res.json({ compte, lignes, solde_final: solde });
+    res.json({ compte, solde_ouverture: soldeOuverture, lignes, solde_final: solde });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1289,18 +1347,7 @@ app.get('/api/financial-analysis', async (req, res) => {
 // --- FINANCIAL STATEMENTS (ÉTATS FINANCIERS) ---
 app.get('/api/balance', async (req, res) => {
   try {
-    const { clause, params } = await getExerciceDateFilter();
-    const rows = await db.runSelect(`
-      SELECT compte,
-             MAX(libelle) as intitule,
-             SUM(debit) as total_debit,
-             SUM(credit) as total_credit,
-             (SUM(debit) - SUM(credit)) as solde
-      FROM journal
-      ${clause ? `WHERE ${clause}` : ''}
-      GROUP BY compte
-      ORDER BY compte ASC
-    `, params);
+    const rows = await getBalanceRows();
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2579,8 +2626,19 @@ app.post('/api/journal/rejeter', async (req, res) => {
   }
 });
 
+// Catch-all route pour SPA : renvoie index.html si la route n'est pas une API
+app.use((req, res) => {
+  if (!req.path.startsWith('/api') && req.method === 'GET') {
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+  }
+  res.status(404).send('Not found');
+});
+
 if (!process.env.VERCEL && !process.env.NOW_BUILDER && !process.env.VERCEL_ENV) {
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 3003;
   app.listen(PORT, () => {
     console.log(`Backend server running on http://localhost:${PORT}`);
     startAutoSyncCron();

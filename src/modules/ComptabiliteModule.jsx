@@ -29,10 +29,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [manualStatus, setManualStatus] = useState('');
   const [memoryMatch, setMemoryMatch] = useState({});
   const [fetchError, setFetchError] = useState('');
-  const [customAccounts, setCustomAccounts] = useState({});
   const [balanceFilterCompte, setBalanceFilterCompte] = useState('');
   const [balanceClassFilter, setBalanceClassFilter] = useState('');
+  const [balanceFilter, setBalanceFilter] = useState('');
   const [journalCodes, setJournalCodes] = useState(['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR']);
+  const [customAccounts, setCustomAccounts] = useState({});
 
   // --- DSF OHADA STATES ---
   const [dsfSubTab, setDsfSubTab] = useState('controls');
@@ -748,6 +749,12 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                     </tr>
                   </thead>
                   <tbody>
+                    {!!glLedger.solde_ouverture && (
+                      <tr style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(0,0,0,0.02)', fontStyle: 'italic', color: 'var(--color-text-muted)' }}>
+                        <td colSpan="8" style={{ padding: '0.5rem' }}>Solde d'ouverture (reporté des exercices antérieurs)</td>
+                        <td style={{ padding: '0.5rem', textAlign: 'right', fontWeight: 500 }}>{glLedger.solde_ouverture.toLocaleString()}</td>
+                      </tr>
+                    )}
                     {glLedger.lignes.length === 0 ? (
                       <tr>
                         <td colSpan="9" style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
@@ -809,28 +816,31 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         });
 
         const groups = {};
-        let bilan_debit = 0, bilan_credit = 0;
-        let gestion_debit = 0, gestion_credit = 0;
-        let grand_debit = 0, grand_credit = 0;
-
+        let bilan_anterieur = 0, bilan_debit = 0, bilan_credit = 0;
+        let gestion_anterieur = 0, gestion_debit = 0, gestion_credit = 0;
+        let grand_anterieur = 0, grand_debit = 0, grand_credit = 0;
         filteredRows.forEach(row => {
           const compteStr = String(row.compte);
           const root = compteStr.substring(0, 2);
           if (!groups[root]) {
-            groups[root] = { rows: [], t_debit: 0, t_credit: 0 };
+            groups[root] = { rows: [], t_anterieur: 0, t_debit: 0, t_credit: 0 };
           }
           groups[root].rows.push(row);
+          groups[root].t_anterieur += (row.solde_anterieur || 0);
           groups[root].t_debit += (row.total_debit || 0);
           groups[root].t_credit += (row.total_credit || 0);
 
           const rootClass = parseInt(compteStr.substring(0, 1), 10);
           if (rootClass >= 1 && rootClass <= 5) {
+            bilan_anterieur += (row.solde_anterieur || 0);
             bilan_debit += (row.total_debit || 0);
             bilan_credit += (row.total_credit || 0);
           } else if (rootClass >= 6 && rootClass <= 9) {
+            gestion_anterieur += (row.solde_anterieur || 0);
             gestion_debit += (row.total_debit || 0);
             gestion_credit += (row.total_credit || 0);
           }
+          grand_anterieur += (row.solde_anterieur || 0);
           grand_debit += (row.total_debit || 0);
           grand_credit += (row.total_credit || 0);
         });
@@ -905,6 +915,27 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                 </div>
               )}
             </div>
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem' }}>
+              <div style={{ maxWidth: '320px', width: '100%' }}>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.8rem', fontWeight: 500, color: 'var(--color-text-muted)' }}>
+                  Filtrer par n° de compte (préfixe)
+                </label>
+                <input
+                  type="text"
+                  className="input"
+                  style={{ padding: '0.5rem' }}
+                  placeholder="Ex : 601 ou 41"
+                  value={balanceFilter}
+                  onChange={e => setBalanceFilter(e.target.value)}
+                  list="chart-of-accounts-list"
+                />
+              </div>
+            </div>
+            {balanceFilter && filteredRows.length === 0 ? (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                Aucun compte ne commence par « {balanceFilter} ».
+              </div>
+            ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '900px', fontSize: '0.85rem' }}>
               <thead>
                 <tr style={{ color: 'var(--color-text-main)' }}>
@@ -926,38 +957,41 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
               <tbody>
                 {Object.keys(groups).sort().map(root => {
                   const group = groups[root];
-                  const subSolde = group.t_debit - group.t_credit;
+                  const subSoldeCumule = group.t_anterieur + (group.t_debit - group.t_credit);
                   return (
                     <Fragment key={root}>
-                      {group.rows.map((row, idx) => (
-                        <tr key={`${root}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
-                          <td style={{ padding: '0.4rem 0.5rem' }}>
-                            <button
-                              onClick={() => openGrandLivre(row.compte)}
-                              style={{ background: 'none', border: 'none', padding: 0, color: 'var(--color-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
-                              title={`Voir le Grand Livre du compte ${row.compte}`}
-                            >
-                              {row.compte}
-                            </button>
-                          </td>
-                          <td style={{ padding: '0.4rem 0.5rem' }}>{getOhadaTitle(row.compte)}</td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}></td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}></td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', borderLeft: '1px solid rgba(0,0,0,0.05)' }}>{row.total_debit > 0 ? row.total_debit.toLocaleString() : ''}</td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', borderRight: '1px solid rgba(0,0,0,0.05)' }}>{row.total_credit > 0 ? row.total_credit.toLocaleString() : ''}</td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{row.solde > 0 ? row.solde.toLocaleString() : ''}</td>
-                          <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{row.solde < 0 ? Math.abs(row.solde).toLocaleString() : ''}</td>
-                        </tr>
-                      ))}
+                      {group.rows.map((row, idx) => {
+                        const soldeCumule = (row.solde_anterieur || 0) + ((row.total_debit || 0) - (row.total_credit || 0));
+                        return (
+                          <tr key={`${root}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                            <td style={{ padding: '0.4rem 0.5rem' }}>
+                              <button
+                                onClick={() => openGrandLivre(row.compte)}
+                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--color-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                                title={`Voir le Grand Livre du compte ${row.compte}`}
+                              >
+                                {row.compte}
+                              </button>
+                            </td>
+                            <td style={{ padding: '0.4rem 0.5rem' }}>{getOhadaTitle(row.compte)}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{row.solde_anterieur > 0 ? row.solde_anterieur.toLocaleString() : ''}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{row.solde_anterieur < 0 ? Math.abs(row.solde_anterieur).toLocaleString() : ''}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', borderLeft: '1px solid rgba(0,0,0,0.05)' }}>{row.total_debit > 0 ? row.total_debit.toLocaleString() : ''}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', borderRight: '1px solid rgba(0,0,0,0.05)' }}>{row.total_credit > 0 ? row.total_credit.toLocaleString() : ''}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{soldeCumule > 0 ? soldeCumule.toLocaleString() : ''}</td>
+                            <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{soldeCumule < 0 ? Math.abs(soldeCumule).toLocaleString() : ''}</td>
+                          </tr>
+                        );
+                      })}
                       <tr style={{ backgroundColor: '#f8fafc', fontWeight: 'bold' }}>
                         <td style={{ padding: '0.4rem 0.5rem' }}>{root}</td>
                         <td style={{ padding: '0.4rem 0.5rem' }}>***SOUS-TOTAL {getOhadaTitle(root)}</td>
-                        <td style={{ padding: '0.4rem 0.5rem' }}></td>
-                        <td style={{ padding: '0.4rem 0.5rem' }}></td>
+                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{group.t_anterieur > 0 ? group.t_anterieur.toLocaleString() : ''}</td>
+                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{group.t_anterieur < 0 ? Math.abs(group.t_anterieur).toLocaleString() : ''}</td>
                         <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{group.t_debit > 0 ? group.t_debit.toLocaleString() : ''}</td>
                         <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{group.t_credit > 0 ? group.t_credit.toLocaleString() : ''}</td>
-                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{subSolde > 0 ? subSolde.toLocaleString() : ''}</td>
-                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{subSolde < 0 ? Math.abs(subSolde).toLocaleString() : ''}</td>
+                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{subSoldeCumule > 0 ? subSoldeCumule.toLocaleString() : ''}</td>
+                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>{subSoldeCumule < 0 ? Math.abs(subSoldeCumule).toLocaleString() : ''}</td>
                       </tr>
                     </Fragment>
                   );
@@ -965,14 +999,15 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
               </tbody>
               <tfoot>
                 {(() => {
-                   const bs = bilan_debit - bilan_credit;
-                   const gs = gestion_debit - gestion_credit;
-                   const gs_tot = grand_debit - grand_credit;
+                   const bs = bilan_anterieur + (bilan_debit - bilan_credit);
+                   const gs = gestion_anterieur + (gestion_debit - gestion_credit);
+                   const gs_tot = grand_anterieur + (grand_debit - grand_credit);
                    return (
                      <>
                         <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 'bold' }}>
                           <td colSpan="2" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Totaux comptes de bilan</td>
-                          <td colSpan="2"></td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{bilan_anterieur > 0 ? bilan_anterieur.toLocaleString() : ''}</td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{bilan_anterieur < 0 ? Math.abs(bilan_anterieur).toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{bilan_debit > 0 ? bilan_debit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{bilan_credit > 0 ? bilan_credit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{bs > 0 ? bs.toLocaleString() : ''}</td>
@@ -980,7 +1015,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                         </tr>
                         <tr style={{ fontWeight: 'bold' }}>
                           <td colSpan="2" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Totaux comptes de gestion</td>
-                          <td colSpan="2"></td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gestion_anterieur > 0 ? gestion_anterieur.toLocaleString() : ''}</td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gestion_anterieur < 0 ? Math.abs(gestion_anterieur).toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gestion_debit > 0 ? gestion_debit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gestion_credit > 0 ? gestion_credit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gs > 0 ? gs.toLocaleString() : ''}</td>
@@ -988,7 +1024,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                         </tr>
                         <tr style={{ borderTop: '2px solid var(--color-border)', borderBottom: '2px solid var(--color-border)', fontWeight: 'bold', backgroundColor: '#f1f5f9' }}>
                           <td colSpan="2" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Totaux de la balance</td>
-                          <td colSpan="2"></td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{grand_anterieur > 0 ? grand_anterieur.toLocaleString() : ''}</td>
+                          <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{grand_anterieur < 0 ? Math.abs(grand_anterieur).toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{grand_debit > 0 ? grand_debit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{grand_credit > 0 ? grand_credit.toLocaleString() : ''}</td>
                           <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{gs_tot > 0 ? gs_tot.toLocaleString() : ''}</td>
@@ -999,6 +1036,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                 })()}
               </tfoot>
             </table>
+            )}
           </div>
         );
       }

@@ -14,6 +14,7 @@ if (!(Test-Path $outputDir)) {
 
 # 1. Verification d'ISCC.exe
 $isccPaths = @(
+    (Join-Path $rootDir "node_modules\innosetup\bin\ISCC.exe"),
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )
@@ -23,15 +24,17 @@ $isccExe = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (!$isccExe) {
     Write-Host "Telechargement d'Inno Setup 6..." -ForegroundColor Yellow
     $innoSetupInstaller = Join-Path $env:TEMP "innosetup-setup.exe"
-    $url = "https://files.jrsoftware.org/is/6/innosetup-6.3.3.exe"
+    $url = "https://files.jrsoftware.org/is/6/innosetup-6.4.1.exe"
     
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $url -OutFile $innoSetupInstaller -UseBasicParsing
-    
-    Write-Host "Installation silencieuse d'Inno Setup..." -ForegroundColor Yellow
-    Start-Process -FilePath $innoSetupInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
-    
-    $isccExe = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $innoSetupInstaller -UseBasicParsing
+        Write-Host "Installation silencieuse d'Inno Setup..." -ForegroundColor Yellow
+        Start-Process -FilePath $innoSetupInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
+        $isccExe = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    } catch {
+        Write-Host "Impossible de telecharger Inno Setup 6 : $_" -ForegroundColor Red
+    }
 }
 
 if ($isccExe) {
