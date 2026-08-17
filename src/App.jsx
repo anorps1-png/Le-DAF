@@ -12,6 +12,7 @@ import { ComptabiliteModule } from './modules/ComptabiliteModule';
 import { AuditModule } from './modules/AuditModule';
 import { MemoryModule } from './modules/MemoryModule';
 import { AnalyseFinanciereModule } from './modules/AnalyseFinanciereModule';
+import { fetchDirectDashboardStats, fetchDirectSupabaseExercices } from './utils/supabaseClient';
 
 // Sélecteur d'exercice comptable, visible en permanence dans le header : l'exercice actif est
 // une sélection globale côté serveur (voir server/index.js getActiveExercice), donc changer de
@@ -28,13 +29,20 @@ const ExerciceSelector = ({ onChange }) => {
   const load = async () => {
     try {
       const [listRes, activeRes] = await Promise.all([
-        fetch('/api/exercices').then(r => r.json()),
-        fetch('/api/exercices/active').then(r => r.json())
+        fetch('/api/exercices').then(r => r.ok ? r.json() : []).catch(() => []),
+        fetch('/api/exercices/active').then(r => r.ok ? r.json() : null).catch(() => null)
       ]);
-      setExercices(Array.isArray(listRes) ? listRes : []);
+      if (Array.isArray(listRes) && listRes.length > 0) {
+        setExercices(listRes);
+      } else {
+        const directEx = await fetchDirectSupabaseExercices();
+        setExercices(Array.isArray(directEx) ? directEx : []);
+      }
       setActive(activeRes || null);
     } catch (e) {
-      console.error(e);
+      console.warn("Exercice load fallback:", e);
+      const directEx = await fetchDirectSupabaseExercices();
+      setExercices(Array.isArray(directEx) ? directEx : []);
     }
   };
 
@@ -429,11 +437,40 @@ const Dashboard = () => {
     const fetchStats = async () => {
       try {
         const res = await fetch('/api/dashboard/stats');
-        const data = await res.json();
-        setStats(data);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data.tresorerie === 'number') {
+            setStats(data);
+            setLoading(false);
+            return;
+          }
+        }
       } catch (err) {
-        console.error("Erreur stats dashboard:", err);
+        console.warn("Erreur API stats dashboard, bascule sur Supabase direct:", err);
       }
+
+      // Repli direct via le client Supabase (pour Vercel / hors-ligne)
+      try {
+        const directData = await fetchDirectDashboardStats();
+        if (directData) {
+          setStats(directData);
+          setLoading(false);
+          return;
+        }
+      } catch (directErr) {
+        console.error("Erreur direct Supabase stats:", directErr);
+      }
+
+      // Valeurs par défaut sécurisées
+      setStats({
+        tresorerie: 0,
+        dettes: 0,
+        factures_fournisseurs: 0,
+        creances: 0,
+        factures_clients: 0,
+        ca: 0,
+        charges: 0
+      });
       setLoading(false);
     };
     fetchStats();
@@ -443,37 +480,43 @@ const Dashboard = () => {
     return <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Chargement de la vue d'ensemble...</div>;
   }
 
-  if (!stats) {
-    return <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-error)' }}>Erreur lors de la récupération des données.</div>;
-  }
+  const safeStats = stats || {
+    tresorerie: 0,
+    dettes: 0,
+    factures_fournisseurs: 0,
+    creances: 0,
+    factures_clients: 0,
+    ca: 0,
+    charges: 0
+  };
 
-  const result = stats.ca - stats.charges;
-  const marginPercent = stats.ca > 0 ? Math.round((result / stats.ca) * 100) : 0;
+  const result = safeStats.ca - safeStats.charges;
+  const marginPercent = safeStats.ca > 0 ? Math.round((result / safeStats.ca) * 100) : 0;
 
   return (
     <>
       <div className="module-grid">
         <div className="card stat-card" style={{ background: 'linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%)', color: 'white', border: 'none' }}>
           <span className="stat-title" style={{ color: 'rgba(255,255,255,0.8)' }}>Trésorerie Globale (Toutes Banques)</span>
-          <span className="stat-value" style={{ color: 'white' }}>{stats.tresorerie.toLocaleString()} FCFA</span>
-          <span style={{ color: stats.tresorerie >= 0 ? 'rgba(209, 250, 229, 0.9)' : '#fca5a5', fontSize: '0.875rem', fontWeight: 500 }}>
-            {stats.tresorerie >= 0 ? 'Situation saine' : 'Trésorerie déficitaire'}
+          <span className="stat-value" style={{ color: 'white' }}>{safeStats.tresorerie.toLocaleString()} FCFA</span>
+          <span style={{ color: safeStats.tresorerie >= 0 ? 'rgba(209, 250, 229, 0.9)' : '#fca5a5', fontSize: '0.875rem', fontWeight: 500 }}>
+            {safeStats.tresorerie >= 0 ? 'Situation saine' : 'Trésorerie déficitaire'}
           </span>
         </div>
         
         <div className="card stat-card">
           <span className="stat-title">Dettes Fournisseurs (401)</span>
-          <span className="stat-value">{stats.dettes.toLocaleString()} FCFA</span>
-          <span style={{ color: stats.factures_fournisseurs > 0 ? 'var(--color-error)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
-            {stats.factures_fournisseurs} facture(s) enregistrée(s)
+          <span className="stat-value">{safeStats.dettes.toLocaleString()} FCFA</span>
+          <span style={{ color: safeStats.factures_fournisseurs > 0 ? 'var(--color-error)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
+            {safeStats.factures_fournisseurs} facture(s) enregistrée(s)
           </span>
         </div>
         
         <div className="card stat-card">
           <span className="stat-title">Créances Clients (411)</span>
-          <span className="stat-value">{stats.creances.toLocaleString()} FCFA</span>
-          <span style={{ color: stats.factures_clients > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
-            {stats.factures_clients} facture(s) en attente
+          <span className="stat-value">{safeStats.creances.toLocaleString()} FCFA</span>
+          <span style={{ color: safeStats.factures_clients > 0 ? 'var(--color-warning)' : 'var(--color-success)', fontSize: '0.875rem', fontWeight: 500 }}>
+            {safeStats.factures_clients} facture(s) en attente
           </span>
         </div>
       </div>
@@ -484,12 +527,12 @@ const Dashboard = () => {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
           <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
             <span style={{ display: 'block', fontSize: '0.875rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>Chiffre d'Affaires (Ventes 70)</span>
-            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-success)' }}>{stats.ca.toLocaleString()} FCFA</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-success)' }}>{safeStats.ca.toLocaleString()} FCFA</span>
           </div>
           
           <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
             <span style={{ display: 'block', fontSize: '0.875rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>Charges d'Exploitation (Classe 6)</span>
-            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-error)' }}>{stats.charges.toLocaleString()} FCFA</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'var(--color-error)' }}>{safeStats.charges.toLocaleString()} FCFA</span>
           </div>
 
           <div style={{ background: 'var(--color-bg-light)', padding: '1.5rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)' }}>
@@ -504,7 +547,7 @@ const Dashboard = () => {
         </div>
 
         <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
-          ⚠️ Les calculs ci-dessus sont mis à jour en temps réel à partir de votre journal général d'écritures.
+          ⚡ Les calculs ci-dessus sont synchronisés en temps réel à partir de votre journal général d'écritures.
         </p>
       </div>
     </>

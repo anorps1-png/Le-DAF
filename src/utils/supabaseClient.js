@@ -116,3 +116,62 @@ export const fetchDirectSupabaseExercices = async () => {
     return null;
   }
 };
+
+export const fetchDirectDashboardStats = async (dateDebut = '', dateFin = '') => {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    let query = client.from('journal').select('compte, debit, credit, n_facture, date');
+    if (dateDebut && dateFin) {
+      query = query.gte('date', dateDebut).lte('date', dateFin);
+    }
+    const { data, error } = await query;
+    if (error || !Array.isArray(data)) return null;
+
+    let treso = 0;
+    let dettes = 0;
+    let creances = 0;
+    let ca = 0;
+    let charges = 0;
+    const facturesFournisseursSet = new Set();
+    const facturesClientsSet = new Set();
+
+    data.forEach(r => {
+      const c = String(r.compte || '').trim();
+      const debit = Number(r.debit) || 0;
+      const credit = Number(r.credit) || 0;
+      const nFac = (r.n_facture || '').trim();
+
+      if (c.startsWith('52') || c.startsWith('57')) {
+        treso += (debit - credit);
+      }
+      if (c.startsWith('401')) {
+        dettes += (credit - debit);
+        if (nFac) facturesFournisseursSet.add(nFac);
+      }
+      if (c.startsWith('411')) {
+        creances += (debit - credit);
+        if (nFac) facturesClientsSet.add(nFac);
+      }
+      if (c.startsWith('70')) {
+        ca += (credit - debit);
+      }
+      if (c.startsWith('6')) {
+        charges += (debit - credit);
+      }
+    });
+
+    return {
+      tresorerie: treso,
+      dettes: Math.max(0, dettes),
+      factures_fournisseurs: facturesFournisseursSet.size,
+      creances: Math.max(0, creances),
+      factures_clients: facturesClientsSet.size,
+      ca: Math.max(0, ca),
+      charges: Math.max(0, charges)
+    };
+  } catch (e) {
+    console.error('Direct Supabase stats error:', e);
+    return null;
+  }
+};
