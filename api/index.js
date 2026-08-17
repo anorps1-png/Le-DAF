@@ -1,5 +1,3 @@
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const app = require('../server/index.js');
+import app from '../server/index.js';
 
 export default app;

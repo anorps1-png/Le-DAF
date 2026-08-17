@@ -474,18 +474,23 @@ async function performSync(force = false) {
 }
 
 // Fonction pour hydrater la base SQLite si on est sur Vercel (serverless) ou après un délai
-async function ensureDatabaseHydrated(maxAgeMs = 15000) {
+async function ensureDatabaseHydrated(maxAgeMs = 60000) {
   const now = Date.now();
-  if (now - lastHydratedTime < maxAgeMs) {
-    return; // Toujours frais
+  if (lastHydratedTime > 0 && (now - lastHydratedTime) < maxAgeMs) {
+    return; // Déjà hydraté récemment
   }
   
-  // Vérifier si SQLite est vide (par exemple sur Vercel après un cold start)
-  const rows = await db.runSelect("SELECT COUNT(*) as count FROM journal");
-  const rowCount = (rows && rows[0]) ? rows[0].count : 0;
-  
-  if (rowCount === 0 || isVercel || now - lastHydratedTime >= maxAgeMs) {
-    await performSync(true);
+  if (syncInProgress) return;
+
+  try {
+    const rows = await db.runSelect("SELECT COUNT(*) as count FROM journal");
+    const rowCount = (rows && rows[0]) ? rows[0].count : 0;
+    
+    if (rowCount === 0 || lastHydratedTime === 0 || (now - lastHydratedTime) >= maxAgeMs) {
+      await performSync(true);
+    }
+  } catch (e) {
+    console.warn("Hydration attempt warning:", e.message);
   }
 }
 
