@@ -7,6 +7,7 @@ const { PDFParse } = require('pdf-parse');
 const db = require('./db');
 const { askAI, matchTransactionWithMemory, learnFromJournalData, friendlyAiErrorMessage } = require('./ai');
 const { computeEtatsFinanciers } = require('./ohadaRules');
+const { getSyncSettings, getPendingLocalCount, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
 
 const path = require('path');
 const fs = require('fs');
@@ -14,6 +15,18 @@ const fs = require('fs');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Middleware d'auto-hydratation pour Vercel / Cloud Serverless
+app.use(async (req, res, next) => {
+  if (req.path.startsWith('/api') && !req.path.startsWith('/api/sync')) {
+    try {
+      await ensureDatabaseHydrated(15000);
+    } catch (e) {
+      // Ne bloque pas la requête si le réseau est temporairement indisponible
+    }
+  }
+  next();
+});
 
 // Serve public/exports directory for generated files
 const exportsDir = path.join(__dirname, 'public', 'exports');
@@ -2316,8 +2329,6 @@ if (fs.existsSync(distDir)) {
     res.sendFile(path.join(distDir, 'index.html'));
   });
 }
-
-const { getSyncSettings, getPendingLocalCount, performSync, startAutoSyncCron } = require('./supabaseSync');
 
 // --- ROUTES SYNCHRONISATION SUPABASE ---
 app.get('/api/sync/status', async (req, res) => {
