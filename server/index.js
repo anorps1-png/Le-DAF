@@ -2424,6 +2424,117 @@ app.post('/api/sync/trigger', async (req, res) => {
   }
 });
 
+// --- GESTIONNAIRE DE MISES À JOUR AUTOMATIQUES (MULTI-POSTES) ---
+const CURRENT_VERSION = "2.0.0";
+const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/anorps1-png/Le-DAF/main/version.json";
+
+function compareSemVer(v1, v2) {
+  const parse = v => (v || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const p1 = parse(v1);
+  const p2 = parse(v2);
+  for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
+    const num1 = p1[i] || 0;
+    const num2 = p2[i] || 0;
+    if (num1 > num2) return 1;
+    if (num1 < num2) return -1;
+  }
+  return 0;
+}
+
+app.get('/api/system/version', (req, res) => {
+  res.json({
+    version: CURRENT_VERSION,
+    appName: 'Agent OHADA (Le-DAF)',
+    isDesktop: !process.env.VERCEL,
+    platform: process.platform,
+    arch: process.arch
+  });
+});
+
+app.get('/api/system/check-update', async (req, res) => {
+  try {
+    const response = await fetch(UPDATE_MANIFEST_URL + '?t=' + Date.now());
+    if (!response.ok) {
+      return res.json({ hasUpdate: false, currentVersion: CURRENT_VERSION, message: 'Impossible de joindre le serveur de mise à jour.' });
+    }
+    const manifest = await response.json();
+    const latestVersion = manifest.version || CURRENT_VERSION;
+    const hasUpdate = compareSemVer(latestVersion, CURRENT_VERSION) > 0;
+    
+    res.json({
+      hasUpdate,
+      currentVersion: CURRENT_VERSION,
+      latestVersion,
+      downloadUrl: manifest.downloadUrl,
+      releaseDate: manifest.releaseDate,
+      releaseNotes: manifest.releaseNotes
+    });
+  } catch (err) {
+    res.json({
+      hasUpdate: false,
+      currentVersion: CURRENT_VERSION,
+      error: err.message
+    });
+  }
+});
+
+app.post('/api/system/apply-update', async (req, res) => {
+  try {
+    const { downloadUrl } = req.body;
+    if (!downloadUrl) {
+      return res.status(400).json({ error: 'URL de téléchargement requise.' });
+    }
+
+    const https = require('https');
+    const http = require('http');
+    const { spawn } = require('child_process');
+    const os = require('os');
+
+    const tempSetupPath = path.join(os.tmpdir(), `AgentOHADA-Setup-v${Date.now()}.exe`);
+    const fileStream = fs.createWriteStream(tempSetupPath);
+
+    const download = (url, cb) => {
+      const proto = url.startsWith('https') ? https : http;
+      proto.get(url, (response) => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          return download(response.headers.location, cb);
+        }
+        response.pipe(fileStream);
+        fileStream.on('finish', () => {
+          fileStream.close(cb);
+        });
+      }).on('error', (err) => {
+        fs.unlink(tempSetupPath, () => {});
+        cb(err);
+      });
+    };
+
+    download(downloadUrl, (err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Erreur lors du téléchargement : ' + err.message });
+      }
+
+      try {
+        const child = spawn(tempSetupPath, ['/SILENT', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS'], {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+
+        res.json({ success: true, message: 'Mise à jour téléchargée. L\'installation va redémarrer l\'application.' });
+        
+        setTimeout(() => {
+          process.exit(0);
+        }, 1500);
+      } catch (spawnErr) {
+        res.status(500).json({ error: 'Erreur au lancement de l\'installateur : ' + spawnErr.message });
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/sync/config', async (req, res) => {
   try {
     const { url, key, autoSync } = req.body;

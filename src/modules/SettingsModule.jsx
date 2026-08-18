@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download } from 'lucide-react';
+import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download, ArrowUpCircle, Laptop, ShieldCheck } from 'lucide-react';
 import { getSupabaseConfig, saveSupabaseConfig } from '../utils/supabaseClient';
 
 export const SettingsModule = () => {
@@ -25,6 +25,13 @@ export const SettingsModule = () => {
   const [showSql, setShowSql] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
 
+  // Mises à jour & Multi-postes
+  const [appVersion, setAppVersion] = useState('2.0.0');
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState('');
+
   useEffect(() => {
     fetch('/api/settings')
       .then(res => res.json())
@@ -38,8 +45,51 @@ export const SettingsModule = () => {
       }))
       .catch(e => console.error(e));
 
+    fetch('/api/system/version')
+      .then(res => res.json())
+      .then(data => { if (data && data.version) setAppVersion(data.version); })
+      .catch(() => {});
+
     fetchSyncStatus();
   }, []);
+
+  const handleCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateMsg('');
+    try {
+      const res = await fetch('/api/system/check-update');
+      const data = await res.json();
+      setUpdateInfo(data);
+      if (!data.hasUpdate) {
+        setUpdateMsg(`Votre logiciel est à jour (v${data.currentVersion || appVersion}).`);
+      }
+    } catch (e) {
+      setUpdateMsg("Impossible de vérifier les mises à jour (vérifiez votre connexion Internet).");
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleApplyUpdate = async () => {
+    if (!updateInfo || !updateInfo.downloadUrl) return;
+    setIsUpdating(true);
+    setUpdateMsg("Téléchargement et installation de la mise à jour en cours... L'application va redémarrer.");
+    try {
+      const res = await fetch('/api/system/apply-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadUrl: updateInfo.downloadUrl })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setUpdateMsg(data.error || "Erreur lors de la mise à jour.");
+        setIsUpdating(false);
+      }
+    } catch (e) {
+      setUpdateMsg("Erreur de communication avec le serveur d'installation.");
+      setIsUpdating(false);
+    }
+  };
 
   const fetchSyncStatus = () => {
     const localCfg = getSupabaseConfig();
@@ -401,6 +451,81 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
               <CheckCircle size={16} /> Clés IA enregistrées avec succès !
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Carte Mises à jour & Multi-postes */}
+      <div className="card" style={{ marginTop: '1.5rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-lg)' }}>
+        <div style={{ padding: '1.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <Laptop size={22} style={{ color: 'var(--color-primary)' }} />
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>Déploiement Multi-Postes & Mises à Jour Automatiques</h3>
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+                  Version installée : <strong>v{appVersion}</strong>
+                </span>
+              </div>
+            </div>
+
+            <button 
+              className="btn btn-secondary" 
+              onClick={handleCheckUpdate} 
+              disabled={isCheckingUpdate || isUpdating}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
+            >
+              <RefreshCw size={14} className={isCheckingUpdate ? 'spin' : ''} />
+              {isCheckingUpdate ? 'Vérification...' : '🔍 Vérifier les mises à jour'}
+            </button>
+          </div>
+
+          <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1rem', lineHeight: 1.5 }}>
+            Ce logiciel fonctionne en réseau multi-postes : chaque ordinateur synchronise ses écritures via Supabase Cloud en toute sécurité tout en restant 100% opérationnel hors-ligne.
+          </p>
+
+          {updateMsg && (
+            <div style={{ padding: '0.75rem 1rem', background: '#f8fafc', borderRadius: 'var(--radius-md)', fontSize: '0.85rem', marginBottom: '1rem', border: '1px solid var(--color-border)' }}>
+              {updateMsg}
+            </div>
+          )}
+
+          {updateInfo && updateInfo.hasUpdate && (
+            <div style={{ padding: '1rem', background: '#ecfdf5', borderRadius: 'var(--radius-md)', border: '1px solid #a7f3d0', marginBottom: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#065f46', fontWeight: 600, marginBottom: '0.5rem' }}>
+                <ArrowUpCircle size={18} /> Nouvelle version disponible : v{updateInfo.latestVersion}
+              </div>
+              {updateInfo.releaseNotes && (
+                <div style={{ fontSize: '0.8rem', color: '#047857', marginBottom: '0.75rem' }}>
+                  {updateInfo.releaseNotes}
+                </div>
+              )}
+              <button 
+                className="btn btn-primary" 
+                onClick={handleApplyUpdate}
+                disabled={isUpdating}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}
+              >
+                <ArrowUpCircle size={16} />
+                {isUpdating ? 'Mise à jour en cours...' : `Mettre à jour vers v${updateInfo.latestVersion} maintenant`}
+              </button>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border)' }}>
+            <a 
+              href="https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentOHADA-Setup.exe" 
+              className="btn btn-secondary"
+              target="_blank" 
+              rel="noreferrer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', textDecoration: 'none' }}
+            >
+              <Download size={14} /> 📥 Télécharger le Setup d'installation pour un autre PC
+            </a>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+              <ShieldCheck size={14} style={{ color: 'var(--color-success)' }} />
+              Base de données SQLite locale préservée lors de chaque mise à jour.
+            </div>
+          </div>
         </div>
       </div>
 
