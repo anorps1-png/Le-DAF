@@ -17,6 +17,12 @@ try {
     } else {
       console.log('Connected to the SQLite database.');
       
+      // Activer le mode WAL et optimisations de performance SQLite (ultra rapide)
+      db.run("PRAGMA journal_mode = WAL;");
+      db.run("PRAGMA synchronous = NORMAL;");
+      db.run("PRAGMA temp_store = MEMORY;");
+      db.run("PRAGMA cache_size = -64000;"); // 64MB cache
+      
       // Initialize Tables
       db.serialize(() => {
         // Settings Table (for API Keys)
@@ -24,6 +30,13 @@ try {
           key TEXT PRIMARY KEY,
           value TEXT
         )`);
+
+        // Index pour accélération foudroyante sur les grands volumes (100k+ lignes)
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_date ON journal(date)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte ON journal(compte)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte_tiers ON journal(compte_tiers)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_updated_at ON journal(updated_at)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_piece_id ON journal(piece_id)`);
 
         // Tiers Table (Clients/Fournisseurs)
         db.run(`CREATE TABLE IF NOT EXISTS tiers (

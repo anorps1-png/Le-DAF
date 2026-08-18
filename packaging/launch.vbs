@@ -57,12 +57,12 @@ End If
 
 ' 4. Lancement dans une fenêtre autonome dédiée (sans onglets, sans barre d'adresse)
 If edgePath <> "" Then
-  browserCmd = """" & edgePath & """ --app=http://localhost:3000 --window-size=1440,900 --user-data-dir=""" & appProfileDir & """ --app-id=AgentOHADA"
+  browserCmd = """" & edgePath & """ --app=http://localhost:3003 --window-size=1440,900 --user-data-dir=""" & appProfileDir & """ --app-id=AgentOHADA"
   shell.Run browserCmd, 1, False
 ElseIf chromePath <> "" Then
-  browserCmd = """" & chromePath & """ --app=http://localhost:3000 --window-size=1440,900 --user-data-dir=""" & appProfileDir & """"
+  browserCmd = """" & chromePath & """ --app=http://localhost:3003 --window-size=1440,900 --user-data-dir=""" & appProfileDir & """"
   shell.Run browserCmd, 1, False
 Else
   ' Repli si aucun navigateur Chromium n'est trouvé
-  shell.Run "http://localhost:3000", 1, False
+  shell.Run "http://localhost:3003", 1, False
 End If

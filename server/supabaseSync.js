@@ -81,7 +81,7 @@ function chunkArray(array, size) {
 }
 
 // Synchronisation Bidirectionnelle complète (PUSH & PULL) entre PC (SQLite) et Vercel (Supabase)
-async function performSync(force = false) {
+async function performSync(force = false, isFullSync = false) {
   if (syncInProgress) {
     return { status: 'in_progress', message: 'Synchronisation déjà en cours...' };
   }
@@ -284,61 +284,85 @@ async function performSync(force = false) {
     // PHASE 2 : PULL (Rapatriement des données Supabase vers le local)
     // -----------------------------------------------------------------
 
-    // A) PULL Journal depuis Supabase (avec pagination pour tout récupérer)
+    // A) PULL Journal depuis Supabase (Incrémentiel via updated_at & Transactions SQLite ultra-rapides)
     try {
+      const lastPullRows = await db.runSelect("SELECT value FROM settings WHERE key = 'LAST_JOURNAL_PULL_AT'");
+      const lastPullAt = (lastPullRows && lastPullRows[0]) ? lastPullRows[0].value : null;
+
+      const localCountRows = await db.runSelect("SELECT COUNT(*) as count FROM journal");
+      const localCount = (localCountRows && localCountRows[0]) ? localCountRows[0].count : 0;
+
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
+      let latestUpdatedTimestamp = lastPullAt;
 
       while (hasMore) {
-        const { data: remoteJournal, error: jErr } = await client
-          .from('journal')
-          .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1)
-          .order('id', { ascending: true });
+        let query = client.from('journal').select('*');
+        if (localCount > 0 && lastPullAt && !isFullSync) {
+          query = query.gt('updated_at', lastPullAt).order('updated_at', { ascending: true });
+        } else {
+          query = query.order('id', { ascending: true });
+        }
+
+        const { data: remoteJournal, error: jErr } = await query.range(fromIdx, fromIdx + pageSize - 1);
 
         if (!jErr && Array.isArray(remoteJournal) && remoteJournal.length > 0) {
-          for (const r of remoteJournal) {
-            if (!r.id && !r.compte && !r.libelle) continue;
-            await db.runUpdate(
-              `INSERT OR REPLACE INTO journal (
+          await new Promise((resolve, reject) => {
+            db.serialize(() => {
+              db.run("BEGIN TRANSACTION");
+              const stmt = db.prepare(`INSERT OR REPLACE INTO journal (
                 id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id,
                 statut_lettrage, code_lettrage, date_lettrage, auteur_lettrage, date_echeance, date_reglement, mode_paiement, reference_banque,
                 statut_validation, validateur, date_validation, motif_rejet, centre_de_cout, tva_taux, tva_montant, piece_jointe, synced_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-              [
-                r.id,
-                r.code_journal || 'AC',
-                r.poste_budgetaire || '',
-                r.date || '',
-                r.compte || '',
-                r.compte_tiers || '',
-                r.libelle || '',
-                r.n_facture || '',
-                r.reference || '',
-                Number(r.debit) || 0,
-                Number(r.credit) || 0,
-                r.piece_id || null,
-                r.statut_lettrage || 'non_lettre',
-                r.code_lettrage || null,
-                r.date_lettrage || null,
-                r.auteur_lettrage || null,
-                r.date_echeance || null,
-                r.date_reglement || null,
-                r.mode_paiement || null,
-                r.reference_banque || null,
-                r.statut_validation || 'valide',
-                r.validateur || null,
-                r.date_validation || null,
-                r.motif_rejet || null,
-                r.centre_de_cout || null,
-                Number(r.tva_taux) || 0,
-                Number(r.tva_montant) || 0,
-                r.piece_jointe || null
-              ]
-            );
-            pulledCount++;
-          }
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`);
+
+              for (const r of remoteJournal) {
+                if (!r.id && !r.compte && !r.libelle) continue;
+                stmt.run([
+                  r.id,
+                  r.code_journal || 'AC',
+                  r.poste_budgetaire || '',
+                  r.date || '',
+                  r.compte || '',
+                  r.compte_tiers || '',
+                  r.libelle || '',
+                  r.n_facture || '',
+                  r.reference || '',
+                  Number(r.debit) || 0,
+                  Number(r.credit) || 0,
+                  r.piece_id || null,
+                  r.statut_lettrage || 'non_lettre',
+                  r.code_lettrage || null,
+                  r.date_lettrage || null,
+                  r.auteur_lettrage || null,
+                  r.date_echeance || null,
+                  r.date_reglement || null,
+                  r.mode_paiement || null,
+                  r.reference_banque || null,
+                  r.statut_validation || 'valide',
+                  r.validateur || null,
+                  r.date_validation || null,
+                  r.motif_rejet || null,
+                  r.centre_de_cout || null,
+                  Number(r.tva_taux) || 0,
+                  Number(r.tva_montant) || 0,
+                  r.piece_jointe || null
+                ]);
+                pulledCount++;
+                if (r.updated_at && (!latestUpdatedTimestamp || r.updated_at > latestUpdatedTimestamp)) {
+                  latestUpdatedTimestamp = r.updated_at;
+                }
+              }
+
+              stmt.finalize();
+              db.run("COMMIT", (err) => {
+                if (err) reject(err);
+                else resolve();
+              });
+            });
+          });
+
           if (remoteJournal.length < pageSize) {
             hasMore = false;
           } else {
@@ -347,6 +371,10 @@ async function performSync(force = false) {
         } else {
           hasMore = false;
         }
+      }
+
+      if (latestUpdatedTimestamp) {
+        await db.runUpdate("INSERT OR REPLACE INTO settings (key, value) VALUES ('LAST_JOURNAL_PULL_AT', ?)", [latestUpdatedTimestamp]);
       }
     } catch (e) {
       console.error("Error PULL Journal:", e);

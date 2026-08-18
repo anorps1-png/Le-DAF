@@ -16,20 +16,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Middleware d'auto-hydratation pour Vercel / Cloud Serverless
-app.use(async (req, res, next) => {
-  if (req.path.startsWith('/api') && !req.path.startsWith('/api/sync')) {
-    try {
-      await ensureDatabaseHydrated(15000);
-    } catch (e) {
-      // Ne bloque pas la requête si le réseau est temporairement indisponible
+// Middleware d'auto-hydratation EXCLUSIVEMENT pour Vercel (serverless sans stockage permanent)
+const isVercelServer = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+if (isVercelServer) {
+  app.use(async (req, res, next) => {
+    if (req.path.startsWith('/api') && !req.path.startsWith('/api/sync')) {
+      try {
+        await ensureDatabaseHydrated(60000);
+      } catch (e) {
+        // Ne bloque pas la requête si le réseau est temporairement indisponible
+      }
     }
-  }
-  next();
-});
+    next();
+  });
+}
 
 // Serve public/exports directory for generated files
-const isVercelServer = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
 const exportsDir = isVercelServer
   ? path.join('/tmp', 'exports')
   : path.join(__dirname, 'public', 'exports');
@@ -881,7 +883,12 @@ app.get('/api/tiers', async (req, res) => {
 app.get('/api/journal', async (req, res) => {
   try {
     const { clause, params } = await getExerciceDateFilter();
-    const rows = await db.runSelect(`SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY id DESC`, params);
+    const limit = req.query.limit ? Number(req.query.limit) : 5000;
+    const offset = req.query.offset ? Number(req.query.offset) : 0;
+    const rows = await db.runSelect(
+      `SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error('Error fetching journal:', err);
