@@ -2430,7 +2430,7 @@ app.post('/api/sync/trigger', async (req, res) => {
 });
 
 // --- GESTIONNAIRE DE MISES À JOUR AUTOMATIQUES (MULTI-POSTES) ---
-const CURRENT_VERSION = "2.0.0";
+const CURRENT_VERSION = "2.0.1";
 const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/anorps1-png/Le-DAF/main/version.json";
 
 function compareSemVer(v1, v2) {

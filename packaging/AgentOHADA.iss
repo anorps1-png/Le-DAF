@@ -3,7 +3,7 @@
 ; car le serveur Node local écrit sa base SQLite dans ce même dossier : un emplacement
 ; sous Program Files nécessiterait des droits admin et poserait des soucis d'écriture.
 #define MyAppName "Agent OHADA (Le-DAF)"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.0.1"
 #define MyAppPublisher "Agent OHADA"
 
 [Setup]
