@@ -883,12 +883,17 @@ app.get('/api/tiers', async (req, res) => {
 app.get('/api/journal', async (req, res) => {
   try {
     const { clause, params } = await getExerciceDateFilter();
-    const limit = req.query.limit ? Number(req.query.limit) : 5000;
-    const offset = req.query.offset ? Number(req.query.offset) : 0;
-    const rows = await db.runSelect(
-      `SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY id DESC LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
-    );
+    let sql = `SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY date DESC, id DESC`;
+    const sqlParams = [...params];
+    if (req.query.limit) {
+      sql += ` LIMIT ?`;
+      sqlParams.push(Number(req.query.limit));
+      if (req.query.offset) {
+        sql += ` OFFSET ?`;
+        sqlParams.push(Number(req.query.offset));
+      }
+    }
+    const rows = await db.runSelect(sql, sqlParams);
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error('Error fetching journal:', err);
