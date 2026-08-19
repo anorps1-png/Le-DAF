@@ -28,6 +28,8 @@ dist-ssr
 *.sqlite
 *.db
 *.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 
 # Installer build artifacts (rebuilt locally, not source)
 installer-output/

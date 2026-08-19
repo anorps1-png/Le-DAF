@@ -119,8 +119,42 @@ async function performSync(force = false, isFullSync = false) {
 
   try {
     // -------------------------------------------------------------
-    // PHASE 1 : PUSH (Envoi des modifications locales vers Supabase)
+    // PHASE 1 : PUSH (Envoi des modifications et suppressions locales vers Supabase)
     // -------------------------------------------------------------
+
+    // 0) PUSH DELETES : Répercussion des suppressions locales vers Supabase
+    try {
+      const pendingDeletes = await db.runSelect(
+        "SELECT id, table_name, record_id FROM deleted_records WHERE synced_at IS NULL"
+      );
+
+      if (pendingDeletes && pendingDeletes.length > 0) {
+        const tableGroups = {};
+        for (const d of pendingDeletes) {
+          if (!tableGroups[d.table_name]) tableGroups[d.table_name] = [];
+          tableGroups[d.table_name].push(d);
+        }
+
+        for (const [tbl, list] of Object.entries(tableGroups)) {
+          const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
+          const chunks = chunkArray(list, 100);
+          for (const chunk of chunks) {
+            const idsToDelete = chunk.map(item => tbl === 'chart_of_accounts' ? String(item.record_id) : Number(item.record_id));
+            const { error } = await client.from(tbl).delete().in(idCol, idsToDelete);
+            if (!error) {
+              const syncIds = chunk.map(c => c.id);
+              const placeholders = syncIds.map(() => '?').join(',');
+              await db.runUpdate(`UPDATE deleted_records SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, syncIds);
+              pushedCount += chunk.length;
+            } else {
+              console.warn(`Delete sync warning for ${tbl}:`, error.message);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Deletes to Supabase:", e);
+    }
 
     // A) Journal
     try {

@@ -223,6 +223,7 @@ const ChatbotIA = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef(null);
+  const chatInputRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -250,9 +251,9 @@ const ChatbotIA = () => {
   };
 
   const handleSend = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
     
-    const userMsg = input;
+    const userMsg = input.trim();
     const currentHistory = [...messages, { role: 'user', text: userMsg }];
     
     setMessages(currentHistory);
@@ -272,22 +273,24 @@ const ChatbotIA = () => {
         })
       });
       const data = await res.json();
-      if (data.response) {
+      if (data && data.response) {
         setMessages(prev => [...prev, { 
           role: 'assistant', 
           text: data.response,
           proposal: data.proposal,
           status: data.proposal ? 'pending' : null
         }]);
-      } else if (data.error) {
+      } else if (data && data.error) {
         setMessages(prev => [...prev, { role: 'assistant', text: `Erreur retournée par l'API : ${data.error}` }]);
       } else {
         setMessages(prev => [...prev, { role: 'assistant', text: "Erreur de communication avec l'IA." }]);
       }
     } catch (err) {
       setMessages(prev => [...prev, { role: 'assistant', text: "Impossible de joindre le serveur. Le backend est-il démarré ?" }]);
+    } finally {
+      setLoading(false);
+      setTimeout(() => chatInputRef.current?.focus(), 100);
     }
-    setLoading(false);
   };
 
   const handleApprove = async (index, sql) => {
@@ -415,15 +418,24 @@ const ChatbotIA = () => {
           <Mic size={20} color="var(--color-text-muted)" />
         </button>
         <input 
+          ref={chatInputRef}
           type="text" 
           className="input" 
           placeholder="Posez une question sur vos finances..." 
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyPress={e => e.key === 'Enter' && handleSend()}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+            }
+          }}
           style={{ flex: 1 }} 
+          autoFocus
         />
-        <button className="btn btn-primary" onClick={handleSend} disabled={loading}>Envoyer</button>
+        <button className="btn btn-primary" onClick={handleSend} disabled={loading} style={{ minWidth: '100px' }}>
+          {loading ? 'Analyse...' : 'Envoyer'}
+        </button>
       </div>
     </div>
   );

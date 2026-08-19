@@ -404,13 +404,24 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
           </div>
 
           <div style={{ marginBottom: '1.25rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>URL de Base OpenAI / Sublyx</label>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>URL de Base OpenAI / Sublyx (Optionnel)</label>
             <input 
               type="text" 
               className="input" 
               value={keys.OPENAI_BASE_URL}
               onChange={e => setKeys({...keys, OPENAI_BASE_URL: e.target.value})}
               placeholder="https://api.openai.com/v1" 
+            />
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Nom du Modèle OpenAI / Custom (Optionnel)</label>
+            <input 
+              type="text" 
+              className="input" 
+              value={keys.OPENAI_MODEL}
+              onChange={e => setKeys({...keys, OPENAI_MODEL: e.target.value})}
+              placeholder="gpt-3.5-turbo (ou gpt-4o, mistralai/..., etc.)" 
             />
           </div>
 

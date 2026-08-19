@@ -3,7 +3,7 @@
 ; car le serveur Node local écrit sa base SQLite dans ce même dossier : un emplacement
 ; sous Program Files nécessiterait des droits admin et poserait des soucis d'écriture.
 #define MyAppName "Agent OHADA (Le-DAF)"
-#define MyAppVersion "2.0.1"
+#define MyAppVersion "2.0.2"
 #define MyAppPublisher "Agent OHADA"
 
 [Setup]
@@ -20,7 +20,7 @@ OutputBaseFilename=AgentOHADA-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\node.exe
+UninstallDisplayIcon={app}\AgentOHADA.exe
 CloseApplications=yes
 RestartApplications=no
 
@@ -31,20 +31,15 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Source: "stage\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\launch.vbs"""; WorkingDir: "{app}"
-Name: "{group}\Arrêter {#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\stop.vbs"""; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\AgentOHADA.exe"; WorkingDir: "{app}"
 Name: "{group}\Désinstaller {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\launch.vbs"""; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\AgentOHADA.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Créer un raccourci sur le Bureau"; GroupDescription: "Raccourcis supplémentaires :"
 
 [Run]
-Filename: "wscript.exe"; Parameters: """{app}\stop.vbs"""; Flags: runhidden skipifdoesntexist; StatusMsg: "Arrêt du serveur (si en cours)..."
-Filename: "wscript.exe"; Parameters: """{app}\launch.vbs"""; Description: "Lancer {#MyAppName} maintenant"; Flags: postinstall skipifsilent nowait
-
-[UninstallRun]
-Filename: "wscript.exe"; Parameters: """{app}\stop.vbs"""; Flags: runhidden skipifdoesntexist; RunOnceId: "StopServerBeforeUninstall"
+Filename: "{app}\AgentOHADA.exe"; Description: "Lancer {#MyAppName} maintenant"; Flags: postinstall skipifsilent nowait
 
 [UninstallDelete]
 Type: files; Name: "{app}\server\agent-ohada.sqlite"

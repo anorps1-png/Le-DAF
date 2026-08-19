@@ -7,9 +7,16 @@ let db;
 try {
   sqlite3 = require('sqlite3').verbose();
   const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
-  const dbPath = isVercel
+  const dbPath = process.env.DB_PATH
+    ? process.env.DB_PATH
+    : isVercel
     ? path.join('/tmp', 'agent-ohada.sqlite')
     : path.resolve(__dirname, 'agent-ohada.sqlite');
+
+  const dbDir = path.dirname(dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
 
   db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
@@ -31,13 +38,6 @@ try {
           value TEXT
         )`);
 
-        // Index pour accélération foudroyante sur les grands volumes (100k+ lignes)
-        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_date ON journal(date)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte ON journal(compte)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte_tiers ON journal(compte_tiers)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_updated_at ON journal(updated_at)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_piece_id ON journal(piece_id)`);
-
         // Tiers Table (Clients/Fournisseurs)
         db.run(`CREATE TABLE IF NOT EXISTS tiers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +45,9 @@ try {
           nom TEXT,
           compte_comptable TEXT,
           solde REAL DEFAULT 0,
-          statut TEXT
+          statut TEXT,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
         )`);
 
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tiers_nom ON tiers(nom)`);
@@ -61,12 +63,35 @@ try {
           libelle TEXT,
           n_facture TEXT,
           reference TEXT,
-          debit REAL,
-          credit REAL,
-          piece_id INTEGER
+          debit REAL DEFAULT 0,
+          credit REAL DEFAULT 0,
+          piece_id INTEGER,
+          statut_lettrage TEXT DEFAULT 'non_lettre',
+          code_lettrage TEXT,
+          date_lettrage DATETIME,
+          auteur_lettrage TEXT,
+          date_echeance TEXT,
+          date_reglement TEXT,
+          mode_paiement TEXT,
+          reference_banque TEXT,
+          statut_validation TEXT DEFAULT 'valide',
+          validateur TEXT,
+          date_validation DATETIME,
+          motif_rejet TEXT,
+          centre_de_cout TEXT,
+          tva_taux REAL DEFAULT 0,
+          tva_montant REAL DEFAULT 0,
+          piece_jointe TEXT,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
         )`);
 
-        db.run(`ALTER TABLE journal ADD COLUMN piece_id INTEGER`, () => {});
+        // Index pour accélération foudroyante sur les grands volumes (100k+ lignes)
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_date ON journal(date)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte ON journal(compte)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_compte_tiers ON journal(compte_tiers)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_updated_at ON journal(updated_at)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_journal_piece_id ON journal(piece_id)`);
 
         // Knowledge Docs Table
         db.run(`CREATE TABLE IF NOT EXISTS knowledge_docs (
@@ -82,14 +107,18 @@ try {
         db.run(`CREATE TABLE IF NOT EXISTS chart_of_accounts (
           compte TEXT PRIMARY KEY,
           libelle TEXT NOT NULL,
-          source_doc_id INTEGER
+          source_doc_id INTEGER,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
         )`);
 
         db.run(`CREATE TABLE IF NOT EXISTS exercices (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           libelle TEXT NOT NULL,
           date_debut TEXT NOT NULL,
-          date_fin TEXT NOT NULL
+          date_fin TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
         )`);
 
         db.run(`CREATE TABLE IF NOT EXISTS fiscal_echeances (
@@ -110,7 +139,9 @@ try {
           auto_learned INTEGER DEFAULT 0,
           description TEXT,
           is_active INTEGER DEFAULT 1,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
         )`);
 
         db.run(`CREATE TABLE IF NOT EXISTS sync_logs (
@@ -131,6 +162,42 @@ try {
           statut_matching TEXT DEFAULT 'non_rapproche',
           matched_journal_id INTEGER
         )`);
+
+        // Table de traçabilité des suppressions locales pour synchronisation Supabase
+        db.run(`CREATE TABLE IF NOT EXISTS deleted_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_name TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
+        )`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_deleted_records_synced ON deleted_records(synced_at)`);
+
+        // Triggers automatiques de capture des suppressions
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_journal_delete AFTER DELETE ON journal
+        BEGIN
+          INSERT INTO deleted_records (table_name, record_id) VALUES ('journal', OLD.id);
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_tiers_delete AFTER DELETE ON tiers
+        BEGIN
+          INSERT INTO deleted_records (table_name, record_id) VALUES ('tiers', OLD.id);
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_rules_delete AFTER DELETE ON business_rules
+        BEGIN
+          INSERT INTO deleted_records (table_name, record_id) VALUES ('business_rules', OLD.id);
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_exercices_delete AFTER DELETE ON exercices
+        BEGIN
+          INSERT INTO deleted_records (table_name, record_id) VALUES ('exercices', OLD.id);
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_chart_delete AFTER DELETE ON chart_of_accounts
+        BEGIN
+          INSERT INTO deleted_records (table_name, record_id) VALUES ('chart_of_accounts', OLD.compte);
+        END;`);
 
         // Migration dynamique des colonnes de suivi avancé
         db.all(`PRAGMA table_info(journal)`, (err, columns) => {

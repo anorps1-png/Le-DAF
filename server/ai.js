@@ -16,25 +16,38 @@ async function getSettings() {
 }
 
 async function getFinancialContext() {
-  return new Promise((resolve, reject) => {
-    const tiersQuery = `
-      SELECT 
-        compte_tiers as nom,
-        MAX(compte) as compte,
-        (SUM(debit) - SUM(credit)) as solde,
-        CASE WHEN substr(MAX(compte), 1, 2) = '41' THEN 'Client' ELSE 'Fournisseur' END as type
-      FROM journal
-      WHERE compte_tiers IS NOT NULL AND compte_tiers != ''
-        AND (compte LIKE '40%' OR compte LIKE '41%')
-      GROUP BY compte_tiers
-    `;
-    db.all(tiersQuery, (err, tiers) => {
-      if (err) return reject(err);
-      db.all("SELECT * FROM journal", (err, journal) => {
-        if (err) return reject(err);
-        resolve({ tiers, journal });
-      });
-    });
+  return new Promise(async (resolve, reject) => {
+    try {
+      const settingsRows = await db.runSelect("SELECT value FROM settings WHERE key = 'SELECTED_EXERCICE_ID'");
+      const id = settingsRows[0] && settingsRows[0].value;
+      let exFilter = "";
+      let exParams = [];
+      if (id) {
+        const exRows = await db.runSelect("SELECT date_debut, date_fin FROM exercices WHERE id = ?", [id]);
+        if (exRows[0]) {
+          exFilter = "WHERE date >= ? AND date <= ?";
+          exParams = [exRows[0].date_debut, exRows[0].date_fin];
+        }
+      }
+
+      const tiersQuery = `
+        SELECT 
+          compte_tiers as nom,
+          MAX(compte) as compte,
+          (SUM(debit) - SUM(credit)) as solde,
+          CASE WHEN substr(MAX(compte), 1, 2) = '41' THEN 'Client' ELSE 'Fournisseur' END as type
+        FROM journal
+        WHERE compte_tiers IS NOT NULL AND compte_tiers != ''
+          AND (compte LIKE '40%' OR compte LIKE '41%')
+          ${exFilter ? `AND ${exFilter.replace('WHERE ', '')}` : ''}
+        GROUP BY compte_tiers
+      `;
+      const tiers = await db.runSelect(tiersQuery, exParams);
+      const journal = await db.runSelect(`SELECT * FROM journal ${exFilter} ORDER BY date DESC, id DESC LIMIT 500`, exParams);
+      resolve({ tiers, journal });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
@@ -330,68 +343,114 @@ async function learnFromJournalData(entries) {
   return learnedCount;
 }
 
+function extractProposalFromText(rawText) {
+  if (!rawText || typeof rawText !== 'string') return { text: rawText, proposal: null };
+
+  const proposalRegex = /```(?:proposal|json)?\s*(\{[\s\S]*?"sql"\s*:\s*[\s\S]*?\})\s*```/i;
+  const match = rawText.match(proposalRegex);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      if (parsed && parsed.sql) {
+        let cleanSql = String(parsed.sql).trim();
+        cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
+        cleanSql = cleanSql.replace(/;\s*$/, '').trim();
+
+        const cleanText = rawText.replace(match[0], '').trim();
+        return {
+          text: cleanText || "J'ai formulé la proposition suivante pour validation et exécution :",
+          proposal: {
+            sql: cleanSql,
+            reason: parsed.reason || "Action comptable / financière proposée par l'IA"
+          }
+        };
+      }
+    } catch (e) {
+      // Ignorer si parsing échoue
+    }
+  }
+
+  return { text: rawText, proposal: null };
+}
+
 async function askAI(prompt, history = []) {
   const settings = await getSettings();
   const memoryContext = await getBusinessMemoryContext();
   
   if (settings.DEFAULT_AI === 'gemini' && settings.GEMINI_API_KEY) {
     const context = await getFinancialContext();
-    const systemPrompt = `Tu es le DAF et Expert Comptable OHADA de l'entreprise. 
-Sois EXTRÊMEMENT direct et va droit au but.
+    const systemPrompt = `Tu es le DAF Principal et Expert-Comptable OHADA / SYSCOHADA de l'entreprise.
+Tu as TOUS LES POUVOIRS d'analyse, d'audit, de pilotage financier, de saisie et de correction sur l'ensemble de la comptabilité.
+
+Structure de nos livres et données comptables :
+- Tiers (Clients/Fournisseurs) : ${JSON.stringify(context.tiers)}
+- Journal d'écritures : ${JSON.stringify(context.journal.slice(-100))}
+- Tables accessibles : 'journal', 'tiers', 'chart_of_accounts', 'business_rules', 'fiscal_echeances', 'exercices', 'statement_lines'.
 
 ${memoryContext}
 
-Nos livres de comptes :
-- Tiers : ${JSON.stringify(context.tiers)}
-- Journal : ${JSON.stringify(context.journal)}
-
-Consignes :
-1. Fournis une réponse chirurgicale. Calcule ce qui est demandé. Applique scrupuleusement la Mémoire Métier si elle correspond.
-2. Utilise des tableaux Markdown.
-3. Une seule phrase de conclusion.`;
+Consignes & Règle d'or de sécurité :
+1. Tu as le pouvoir de concevoir toute action comptable : passer des écritures complètes en partie double (Débit/Crédit), corriger des comptes, lettrer des factures, créer des tiers, ajuster la trésorerie.
+2. TOUTE MODIFICATION ou INSERTION dans la base de données nécessite l'autorisation de l'utilisateur. Pour toute action de modification, inclus impérativement à la toute fin de ta réponse un bloc de proposition au format JSON suivant :
+\`\`\`proposal
+{
+  "sql": "Requête SQL (ou plusieurs requêtes séparées par ; pour une écriture en partie double)",
+  "reason": "Explication claire et concise du motif comptable"
+}
+\`\`\`
+3. Fournis une réponse chirurgicale et professionnelle avec des tableaux Markdown pour la présentation des chiffres.`;
     
     let historyText = "";
     if (history && history.length > 0) {
-      // slice the last 6 messages to avoid too much text
-      historyText = history.slice(-6).map(m => `${m.role === 'user' ? 'Utilisateur' : 'IA'}: ${m.content}`).join('\n') + '\n\n';
+      historyText = history.slice(-8).map(m => `${m.role === 'user' ? 'Utilisateur' : 'DAF IA'}: ${m.content}`).join('\n') + '\n\n';
     }
 
     const genAI = new GoogleGenerativeAI(settings.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(`${systemPrompt}\n\nHistorique de la conversation :\n${historyText}Question actuelle: ${prompt}`);
-    return { text: result.response.text(), proposal: null };
+    const result = await model.generateContent(`${systemPrompt}\n\nHistorique :\n${historyText}Question de l'utilisateur : ${prompt}`);
+    const rawResultText = result.response.text();
+    return extractProposalFromText(rawResultText);
   } else if ((settings.DEFAULT_AI === 'openai' && settings.OPENAI_API_KEY) || (settings.DEFAULT_AI === 'deepseek' && settings.DEEPSEEK_API_KEY)) {
-    // Agentic Loop with Tools for OpenAI Compatible endpoints
     const isDeepSeek = settings.DEFAULT_AI === 'deepseek';
     const openai = new OpenAI({ 
       apiKey: isDeepSeek ? settings.DEEPSEEK_API_KEY : settings.OPENAI_API_KEY,
-      baseURL: isDeepSeek ? 'https://api.deepseek.com' : (settings.OPENAI_BASE_URL ? settings.OPENAI_BASE_URL.trim() : undefined)
+      baseURL: isDeepSeek ? 'https://api.deepseek.com' : (settings.OPENAI_BASE_URL && settings.OPENAI_BASE_URL.trim() ? settings.OPENAI_BASE_URL.trim() : undefined)
     });
-    const selectedModel = isDeepSeek ? "deepseek-chat" : (settings.OPENAI_MODEL ? settings.OPENAI_MODEL.trim() : (settings.OPENAI_BASE_URL ? undefined : "gpt-3.5-turbo"));
+    const selectedModel = isDeepSeek 
+      ? "deepseek-chat" 
+      : (settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim() ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo");
 
-    const systemPrompt = `Tu es le DAF et Expert Comptable OHADA de l'entreprise. Tu es un agent autonome équipé d'outils.
-Tu NE DOIS PAS inventer les chiffres. Tu DOIS interroger la base de données comptable.
+    const systemPrompt = `Tu es le DAF Principal et Expert-Comptable OHADA / SYSCOHADA de l'entreprise.
+Tu as TOUS LES POUVOIRS d'analyse, d'audit, de pilotage financier, de saisie et de correction sur l'ensemble de la base comptable.
 
-Structure de la base de données :
-1. Table 'journal' : id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit. (Ex: comptes de charges = 6%, produits = 7%)
-2. Table 'tiers' : id, type, nom, compte_comptable, solde, statut.
+Structure complète de la base de données :
+1. Table 'journal' : id, code_journal (AC, VE, BQ, CA, OD), poste_budgetaire, date (YYYY-MM-DD), compte, compte_tiers, libelle, n_facture, reference, debit, credit, statut_validation.
+2. Table 'tiers' : id, type ('Client' ou 'Fournisseur'), nom, compte_comptable (ex: 411100, 401100), solde, statut.
+3. Table 'chart_of_accounts' : compte (ex: 601100), libelle, source_doc_id.
+4. Table 'business_rules' : id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active.
+5. Table 'fiscal_echeances' : id, libelle, date_limite, type_impot, statut, montant_estime.
+6. Table 'exercices' : id, libelle, date_debut, date_fin.
+7. Table 'statement_lines' : id, date, libelle, debit, credit, solde, matched_journal_id, statut.
+
+${memoryContext}
 
 Instructions :
-- Règle N°1 : Utilise l'outil 'query_database' pour rechercher l'information dont tu as besoin dans les tables avant de répondre. S'il n'y a rien, dis-le.
-- Règle N°2 : Si l'utilisateur te demande de faire une modification, d'ajouter, ou de corriger des données, tu dois utiliser l'outil 'propose_update'.
-- Règle N°3 : Tu peux appeler 'query_database' plusieurs fois de suite si besoin (ex: vérifier une balance avant correction).
-- Règle N°4 : Donne ta réponse finale à l'utilisateur de manière concise et professionnelle, avec des tableaux Markdown pour la présentation des chiffres.`;
+- Règle N°1 : Utilise l'outil 'query_database' pour rechercher l'information dont tu as besoin dans les tables avant de répondre.
+- Règle N°2 : Tu as le pouvoir de proposer TOUTE modification, saisie en partie double, lettrage, rééquilibrage ou correction via l'outil 'propose_update'. L'utilisateur devra obligatoirement l'approuver avant son exécution en base.
+- Règle N°3 : Pour les écritures en partie double (Débit + Crédit), tu peux inclure plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
+- Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.`;
 
     const tools = [
       {
         type: "function",
         function: {
           name: "query_database",
-          description: "Exécute une requête SQL SELECT sur la base de données pour lire les écritures comptables (journal) ou les tiers.",
+          description: "Exécute une requête SQL SELECT sur la base de données pour lire les écritures comptables (journal), les tiers, le plan comptable, les règles ou les états financiers.",
           parameters: {
             type: "object",
             properties: {
-              sql: { type: "string", description: "La requête SQL SELECT. Ex: SELECT SUM(credit) FROM journal WHERE compte LIKE '7%'" }
+              sql: { type: "string", description: "La requête SQL SELECT. Ex: SELECT * FROM journal WHERE compte LIKE '6%'" }
             },
             required: ["sql"]
           }
@@ -401,12 +460,12 @@ Instructions :
         type: "function",
         function: {
           name: "propose_update",
-          description: "Propose une requête SQL de type UPDATE, INSERT ou DELETE. Obligatoire si l'utilisateur te demande de modifier la base. L'utilisateur devra l'approuver.",
+          description: "Propose une requête SQL (UPDATE, INSERT, DELETE) ou un ensemble de requêtes séparées par ';' pour passer une écriture en partie double, modifier ou corriger des données. L'utilisateur devra l'approuver avant son application.",
           parameters: {
             type: "object",
             properties: {
-              sql: { type: "string", description: "La requête SQL de modification." },
-              reason: { type: "string", description: "L'explication métier de cette modification (ex: 'Correction du compte fournisseur selon le plan comptable OHADA')." }
+              sql: { type: "string", description: "La ou les requêtes SQL (ex: INSERT INTO journal ...; INSERT INTO journal ...; ou UPDATE journal ... WHERE id = ...;)" },
+              reason: { type: "string", description: "L'explication métier claire de cette opération comptable pour validation humaine." }
             },
             required: ["sql", "reason"]
           }
@@ -467,15 +526,16 @@ Instructions :
 
     let finalResponse = null;
     let iteration = 0;
-    const maxIterations = 6;
+    const maxIterations = 25; // Niveau de réflexion maximale
 
     while (iteration < maxIterations && !finalResponse) {
       iteration++;
+      const isLastIteration = iteration >= maxIterations - 1;
       const completion = await openai.chat.completions.create({
         messages: messages,
         model: selectedModel,
-        tools: tools,
-        tool_choice: "auto",
+        tools: isLastIteration ? undefined : tools,
+        tool_choice: isLastIteration ? undefined : "auto",
       });
 
       const responseMessage = completion.choices[0].message;
@@ -489,10 +549,10 @@ Instructions :
               let rows = await db.runSelect(args.sql);
               
               let toolResponse;
-              if (rows.length > 50) {
-                const truncated = rows.slice(0, 50);
+              if (rows.length > 100) {
+                const truncated = rows.slice(0, 100);
                 toolResponse = {
-                  warning: `La requête a retourné ${rows.length} lignes. Les résultats ont été tronqués aux 50 premières lignes pour préserver la taille du contexte. Veuillez utiliser des agrégations SQL (ex: SUM, COUNT, GROUP BY) ou filtrer plus précisément (LIMIT, WHERE) pour vos analyses globales.`,
+                  warning: `La requête a retourné ${rows.length} lignes. Les 100 premières sont renvoyées.`,
                   data: truncated
                 };
               } else {
@@ -516,11 +576,16 @@ Instructions :
           } else if (toolCall.function.name === "propose_update") {
             try {
               const args = JSON.parse(toolCall.function.arguments);
+              let cleanSql = (args.sql || "").trim();
+              cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
+              cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
+              cleanSql = cleanSql.replace(/;\s*$/, '').trim();
+              
               finalResponse = {
-                text: `J'ai formulé une proposition de modification pour la base de données :\n\n**Raison** : ${args.reason}\n**Requête** : \`${args.sql}\``,
+                text: args.reason || "Je propose d'exécuter la correction suivante sur votre base de données :",
                 proposal: {
-                  sql: args.sql,
-                  reason: args.reason
+                  sql: cleanSql,
+                  reason: args.reason || "Mise à jour comptable conforme OHADA."
                 }
               };
             } catch (err) {
@@ -531,19 +596,18 @@ Instructions :
               const args = JSON.parse(toolCall.function.arguments);
               const rows = await db.runSelect(args.sql);
               
-              if (rows.length === 0) {
-                throw new Error("Aucune donnée trouvée pour cette requête SQL.");
+              const filename = args.filename || `export_${Date.now()}.xlsx`;
+              const exportPath = path.join(__dirname, 'public', 'exports');
+              if (!fs.existsSync(exportPath)) {
+                fs.mkdirSync(exportPath, { recursive: true });
               }
-
+              
+              const fullPath = path.join(exportPath, filename);
               const xlsx = require('xlsx');
               const ws = xlsx.utils.json_to_sheet(rows);
               const wb = xlsx.utils.book_new();
               xlsx.utils.book_append_sheet(wb, ws, "Données");
-              
-              const filename = args.filename || `export_${Date.now()}.xlsx`;
-              const filePath = path.join(__dirname, 'public', 'exports', filename);
-              
-              xlsx.writeFile(wb, filePath);
+              xlsx.writeFile(wb, fullPath);
               
               const downloadUrl = `http://localhost:3001/public/exports/${filename}`;
               messages.push({
@@ -565,66 +629,41 @@ Instructions :
               const args = JSON.parse(toolCall.function.arguments);
               const rows = await db.runSelect(args.sql);
               
-              if (rows.length === 0) {
-                throw new Error("Aucune donnée trouvée pour générer le PDF.");
-              }
-
-              const PDFDocument = require('pdfkit');
-              const doc = new PDFDocument({ margin: 50, size: 'A4' });
-              
-              const isVercelEnv = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
-              const exportsBaseDir = isVercelEnv ? path.join('/tmp', 'exports') : path.join(__dirname, 'public', 'exports');
-              try { if (!fs.existsSync(exportsBaseDir)) fs.mkdirSync(exportsBaseDir, { recursive: true }); } catch (e) {}
               const filename = args.filename || `rapport_${Date.now()}.pdf`;
-              const filePath = path.join(exportsBaseDir, filename);
-              const stream = fs.createWriteStream(filePath);
+              const exportPath = path.join(__dirname, 'public', 'exports');
+              if (!fs.existsSync(exportPath)) {
+                fs.mkdirSync(exportPath, { recursive: true });
+              }
               
+              const fullPath = path.join(exportPath, filename);
+              const PDFDocument = require('pdfkit');
+              const doc = new PDFDocument({ margin: 30, size: 'A4' });
+              const stream = fs.createWriteStream(fullPath);
               doc.pipe(stream);
               
-              // Titre et Date
-              doc.fontSize(18).font('Helvetica-Bold').text(args.title || "Rapport Financier", { align: 'center' });
-              doc.moveDown(0.5);
-              doc.fontSize(9).font('Helvetica-Oblique').text(`Généré le : ${new Date().toLocaleString()}`, { align: 'right' });
-              doc.moveDown(1.5);
+              doc.fontSize(16).text(args.title || "Rapport Financier", { align: 'center' });
+              doc.moveDown();
               
-              // Colonnes
-              const keys = Object.keys(rows[0]);
-              const colWidth = 500 / keys.length;
-              let y = doc.y;
-              
-              // En-têtes du tableau
-              doc.fontSize(9).font('Helvetica-Bold');
-              keys.forEach((key, i) => {
-                doc.text(key.toUpperCase(), 50 + (i * colWidth), y, { width: colWidth - 5, truncate: true });
-              });
-              
-              // Ligne séparatrice
-              doc.moveTo(50, y + 13).lineTo(550, y + 13).stroke();
-              y += 20;
-              
-              // Données
-              doc.font('Helvetica');
-              rows.forEach((row) => {
-                if (y > 750) {
-                  doc.addPage();
-                  y = 50;
-                  
-                  // Réécrire les en-têtes
-                  doc.fontSize(9).font('Helvetica-Bold');
-                  keys.forEach((key, i) => {
-                    doc.text(key.toUpperCase(), 50 + (i * colWidth), y, { width: colWidth - 5, truncate: true });
-                  });
-                  doc.moveTo(50, y + 13).lineTo(550, y + 13).stroke();
-                  y += 20;
-                  doc.font('Helvetica');
-                }
-                
-                keys.forEach((key, i) => {
-                  const val = row[key] !== null && row[key] !== undefined ? String(row[key]) : "";
-                  doc.text(val, 50 + (i * colWidth), y, { width: colWidth - 5, truncate: true });
+              if (rows.length > 0) {
+                const headers = Object.keys(rows[0]);
+                let y = doc.y;
+                doc.fontSize(10).font('Helvetica-Bold');
+                headers.forEach((h, i) => {
+                  doc.text(h, 30 + i * 80, y);
                 });
-                y += 18;
-              });
+                doc.moveDown();
+                doc.font('Helvetica');
+                
+                rows.slice(0, 30).forEach(r => {
+                  y = doc.y;
+                  headers.forEach((h, i) => {
+                    doc.text(String(r[h] || ''), 30 + i * 80, y);
+                  });
+                  doc.moveDown(0.5);
+                });
+              } else {
+                doc.text("Aucune donnée trouvée.");
+              }
               
               doc.end();
               
@@ -648,16 +687,23 @@ Instructions :
           }
         }
       } else {
-        finalResponse = { text: responseMessage.content, proposal: null };
+        finalResponse = extractProposalFromText(responseMessage.content);
       }
     }
     
-    if (finalResponse && typeof finalResponse === 'object' && 'text' in finalResponse) {
-      return finalResponse;
+    // Récupérer le dernier message de l'assistant si disponible
+    if (!finalResponse) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant' && messages[i].content) {
+          finalResponse = extractProposalFromText(messages[i].content);
+          break;
+        }
+      }
     }
+
     return { 
-      text: typeof finalResponse === 'string' ? finalResponse : "Désolé, j'ai eu besoin de trop d'étapes de réflexion sans arriver à une conclusion.", 
-      proposal: null 
+      text: typeof finalResponse === 'string' ? finalResponse : (finalResponse?.text || "Analyse terminée avec succès."), 
+      proposal: finalResponse?.proposal || null 
     };
   } else {
     return { text: "Veuillez configurer vos clés API dans les paramètres pour activer l'IA.", proposal: null };
@@ -698,7 +744,7 @@ Tu DOIS impérativement répondre UNIQUEMENT avec un objet JSON valide ayant la 
       });
       const completion = await openai.chat.completions.create({
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
-        model: settings.OPENAI_MODEL ? settings.OPENAI_MODEL.trim() : (settings.OPENAI_BASE_URL ? undefined : "gpt-3.5-turbo"),
+        model: (settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim()) ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo",
       });
       resultText = completion.choices[0].message.content;
     } else if (settings.DEFAULT_AI === 'deepseek' && settings.DEEPSEEK_API_KEY) {
@@ -714,7 +760,15 @@ Tu DOIS impérativement répondre UNIQUEMENT avec un objet JSON valide ayant la 
     
     // Nettoyage au cas où l'IA renverrait du markdown
     resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(resultText);
+    const parsed = JSON.parse(resultText);
+    if (parsed && parsed.sql && typeof parsed.sql === 'string') {
+      let cleanSql = parsed.sql.trim();
+      cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
+      cleanSql = cleanSql.replace(/;\s*$/, '').trim();
+      parsed.sql = cleanSql;
+    }
+    return parsed;
   } catch (e) {
     console.error("Audit AI Error:", e);
     return { analyse: "Erreur de l'IA: " + friendlyAiErrorMessage(e), sql: null };

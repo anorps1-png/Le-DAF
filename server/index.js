@@ -882,9 +882,26 @@ app.get('/api/tiers', async (req, res) => {
 
 app.get('/api/journal', async (req, res) => {
   try {
-    const { clause, params } = await getExerciceDateFilter();
-    let sql = `SELECT * FROM journal ${clause ? `WHERE ${clause}` : ''} ORDER BY date DESC, id DESC`;
-    const sqlParams = [...params];
+    const isAll = req.query.all === 'true' || req.query.all === '1';
+    const { clause, params } = isAll ? { clause: '', params: [] } : await getExerciceDateFilter();
+    
+    let whereClauses = [];
+    let sqlParams = [];
+    
+    if (clause) {
+      whereClauses.push(clause);
+      sqlParams.push(...params);
+    }
+    
+    if (req.query.search) {
+      whereClauses.push('(compte LIKE ? OR libelle LIKE ? OR n_facture LIKE ? OR reference LIKE ? OR compte_tiers LIKE ? OR code_journal LIKE ?)');
+      const s = `%${req.query.search}%`;
+      sqlParams.push(s, s, s, s, s, s);
+    }
+
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    let sql = `SELECT * FROM journal ${whereStr} ORDER BY date DESC, id DESC`;
+    
     if (req.query.limit) {
       sql += ` LIMIT ?`;
       sqlParams.push(Number(req.query.limit));
@@ -1958,52 +1975,56 @@ app.get('/api/export/etats-financiers', async (req, res) => {
 const { askAuditAI } = require('./ai');
 
 app.get('/api/audit', async (req, res) => {
-  const checks = [
-    // 1. Tiers manquants
-    db.runSelect("SELECT id, date, compte, libelle, debit, credit FROM journal WHERE (compte LIKE '40%' OR compte LIKE '41%') AND (compte_tiers IS NULL OR compte_tiers = '') LIMIT 20")
-      .then(rows => rows.length > 0 ? { type: 'Tiers Manquant', description: 'Écritures sur comptes 40/41 sans compte tiers renseigné', data: rows } : null),
-
-    // 2. Caisse négative
-    db.runSelect("SELECT compte, SUM(debit)-SUM(credit) as solde FROM journal WHERE compte LIKE '57%' GROUP BY compte HAVING solde < 0")
-      .then(rows => rows.length > 0 ? { type: 'Caisse Négative', description: 'Le solde de la caisse ne peut pas être créditeur', data: rows } : null),
-
-    // 3. Comptes d'attente
-    db.runSelect("SELECT compte, SUM(debit)-SUM(credit) as solde FROM journal WHERE compte LIKE '47%' GROUP BY compte HAVING solde != 0")
-      .then(rows => rows.length > 0 ? { type: 'Comptes d\'attente (47)', description: 'Ces comptes doivent être soldés avant la clôture', data: rows } : null),
-
-    // 4. Comptes invalides (trop courts ou lettres)
-    db.runSelect("SELECT id, date, compte, libelle, debit, credit FROM journal WHERE length(compte) < 2 OR CAST(compte AS INTEGER) = 0 LIMIT 20")
-      .then(rows => rows.length > 0 ? { type: 'Compte Invalide', description: 'La structure du compte ne respecte pas le format numérique standard', data: rows } : null),
-
-    // 5. Déséquilibre global : le contrôle le plus fondamental d'une comptabilité en partie double
-    db.runSelect("SELECT SUM(debit) as total_debit, SUM(credit) as total_credit FROM journal")
-      .then(rows => {
-        const { total_debit, total_credit } = rows[0] || {};
-        const solde = (total_debit || 0) - (total_credit || 0);
-        if (Math.abs(solde) <= 0.01) return null;
-        return {
-          type: 'Déséquilibre Global',
-          description: `Le total des débits (${(total_debit || 0).toLocaleString()}) ne correspond pas au total des crédits (${(total_credit || 0).toLocaleString()}). En partie double, ces deux totaux doivent toujours être égaux.`,
-          data: [{ id: '-', date: '-', compte: 'GLOBAL', libelle: 'Écart débit/crédit sur l\'ensemble du journal', debit: total_debit || 0, credit: total_credit || 0 }]
-        };
-      }),
-
-    // 6. Écritures déséquilibrées : chaque piece_id (saisie manuelle ou import facture) doit s'équilibrer
-    db.runSelect(`
-      SELECT j.piece_id, MIN(j.date) as date, MIN(j.libelle) as libelle, SUM(j.debit) as debit, SUM(j.credit) as credit
-      FROM journal j
-      WHERE j.piece_id IS NOT NULL
-      GROUP BY j.piece_id
-      HAVING ABS(SUM(j.debit) - SUM(j.credit)) > 0.01
-      LIMIT 20
-    `).then(rows => rows.length > 0 ? {
-      type: 'Écriture(s) Déséquilibrée(s)',
-      description: 'Ces écritures (regroupées par pièce) ont un débit total différent du crédit total et doivent être corrigées.',
-      data: rows.map(r => ({ id: r.piece_id, date: r.date, compte: '-', libelle: r.libelle, debit: r.debit, credit: r.credit }))
-    } : null),
-  ];
-
   try {
+    const { clause, params } = await getExerciceDateFilter();
+    const exFilter = clause ? `AND ${clause}` : '';
+    const exWhere = clause ? `WHERE ${clause}` : '';
+
+    const checks = [
+      // 1. Tiers manquants
+      db.runSelect(`SELECT id, date, compte, libelle, debit, credit FROM journal WHERE (compte LIKE '40%' OR compte LIKE '41%') AND (compte_tiers IS NULL OR compte_tiers = '') ${exFilter} LIMIT 20`, params)
+        .then(rows => rows.length > 0 ? { type: 'Tiers Manquant', description: 'Écritures sur comptes 40/41 sans compte tiers renseigné', data: rows } : null),
+
+      // 2. Caisse négative
+      db.runSelect(`SELECT compte, SUM(debit)-SUM(credit) as solde FROM journal ${exWhere} ${exWhere ? 'AND' : 'WHERE'} compte LIKE '57%' GROUP BY compte HAVING solde < 0`, params)
+        .then(rows => rows.length > 0 ? { type: 'Caisse Négative', description: 'Le solde de la caisse ne peut pas être créditeur', data: rows } : null),
+
+      // 3. Comptes d'attente
+      db.runSelect(`SELECT compte, SUM(debit)-SUM(credit) as solde FROM journal ${exWhere} ${exWhere ? 'AND' : 'WHERE'} compte LIKE '47%' GROUP BY compte HAVING solde != 0`, params)
+        .then(rows => rows.length > 0 ? { type: 'Comptes d\'attente (47)', description: 'Ces comptes doivent être soldés avant la clôture', data: rows } : null),
+
+      // 4. Comptes invalides (trop courts ou lettres)
+      db.runSelect(`SELECT id, date, compte, libelle, debit, credit FROM journal WHERE (length(compte) < 2 OR CAST(compte AS INTEGER) = 0) ${exFilter} LIMIT 20`, params)
+        .then(rows => rows.length > 0 ? { type: 'Compte Invalide', description: 'La structure du compte ne respecte pas le format numérique standard', data: rows } : null),
+
+      // 5. Déséquilibre global de l'exercice
+      db.runSelect(`SELECT SUM(debit) as total_debit, SUM(credit) as total_credit FROM journal ${exWhere}`, params)
+        .then(rows => {
+          const { total_debit, total_credit } = rows[0] || {};
+          const solde = (total_debit || 0) - (total_credit || 0);
+          if (Math.abs(solde) <= 0.01) return null;
+          return {
+            type: 'Déséquilibre Global',
+            description: `Le total des débits (${(total_debit || 0).toLocaleString()}) ne correspond pas au total des crédits (${(total_credit || 0).toLocaleString()}). En partie double, ces deux totaux doivent toujours être égaux.`,
+            data: [{ id: '-', date: '-', compte: 'GLOBAL', libelle: 'Écart débit/crédit sur l\'ensemble du journal', debit: total_debit || 0, credit: total_credit || 0 }]
+          };
+        }),
+
+      // 6. Écritures déséquilibrées : chaque piece_id doit s'équilibrer
+      db.runSelect(`
+        SELECT j.piece_id, MIN(j.date) as date, MIN(j.libelle) as libelle, SUM(j.debit) as debit, SUM(j.credit) as credit
+        FROM journal j
+        WHERE j.piece_id IS NOT NULL ${exFilter}
+        GROUP BY j.piece_id
+        HAVING ABS(SUM(j.debit) - SUM(j.credit)) > 0.01
+        LIMIT 20
+      `, params).then(rows => rows.length > 0 ? {
+        type: 'Écriture(s) Déséquilibrée(s)',
+        description: 'Ces écritures (regroupées par pièce) ont un débit total différent du crédit total et doivent être corrigées.',
+        data: rows.map(r => ({ id: r.piece_id, date: r.date, compte: '-', libelle: r.libelle, debit: r.debit, credit: r.credit }))
+      } : null),
+    ];
+
     const results = await Promise.all(checks);
     res.json(results.filter(Boolean));
   } catch (err) {
@@ -2027,50 +2048,123 @@ app.post('/api/audit/advice', async (req, res) => {
 // uniquement les tables comptables (jamais settings/business_rules qui contiennent les clés API
 // ou la config), avec WHERE obligatoire, exécutée dans une transaction annulée si trop de lignes
 // seraient touchées (signe d'une clause WHERE erronée plutôt que d'une correction ciblée).
-const AUDIT_APPLY_ALLOWED_TABLES = ['journal', 'tiers'];
-const AUDIT_APPLY_MAX_AFFECTED_ROWS = 10000;
+const AUDIT_APPLY_ALLOWED_TABLES = ['journal', 'tiers', 'business_rules', 'chart_of_accounts', 'exercices', 'fiscal_echeances', 'statement_lines'];
+
+function splitAndValidateSqlStatements(rawSql) {
+  if (!rawSql || typeof rawSql !== 'string') {
+    return { error: "Aucune requête SQL fournie." };
+  }
+
+  // 1. Enlever les blocs de code Markdown (```sql ... ```, ```json ... ```, ```proposal ... ```)
+  let text = rawSql.trim();
+  text = text.replace(/^```(?:sql|json|proposal)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  // 2. Enlever les commentaires SQL de blocs (/* ... */) et de lignes (-- ...)
+  text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+  text = text.replace(/^--.*$/gm, '').trim();
+
+  if (!text) {
+    return { error: "Requête SQL vide après nettoyage." };
+  }
+
+  // 3. Découper en requêtes séparées par point-virgule (sans couper dans les chaînes littérales)
+  const statements = [];
+  let currentStmt = '';
+  let inString = false;
+  let quoteChar = '';
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if ((char === "'" || char === '"') && (i === 0 || text[i - 1] !== '\\')) {
+      if (!inString) {
+        inString = true;
+        quoteChar = char;
+      } else if (quoteChar === char) {
+        inString = false;
+      }
+      currentStmt += char;
+    } else if (char === ';' && !inString) {
+      if (currentStmt.trim()) {
+        statements.push(currentStmt.trim());
+      }
+      currentStmt = '';
+    } else {
+      currentStmt += char;
+    }
+  }
+
+  if (currentStmt.trim()) {
+    statements.push(currentStmt.trim());
+  }
+
+  if (statements.length === 0) {
+    return { error: "Aucune instruction SQL valide trouvée." };
+  }
+
+  // 4. Valider chaque instruction individuellement
+  const cleanStatements = [];
+  for (let stmt of statements) {
+    // Normaliser préfixe public.table -> table
+    stmt = stmt.replace(/\bpublic\.(\w+)\b/gi, '$1').trim();
+
+    const sqlUpper = stmt.toUpperCase();
+
+    // Bloquer les commandes système bas-niveau de manipulation de fichiers
+    if (sqlUpper.startsWith("PRAGMA") || sqlUpper.startsWith("ATTACH") || sqlUpper.startsWith("DETACH")) {
+      return { error: `La commande système PRAGMA/ATTACH n'est pas autorisée.` };
+    }
+
+    // Autoriser tout SQL d'action : UPDATE, INSERT, DELETE, WITH (CTEs), REPLACE, CREATE, ALTER, DROP
+    const isAllowedVerb = /^(?:UPDATE|INSERT|DELETE|WITH|REPLACE|CREATE|ALTER|DROP)\b/i.test(sqlUpper);
+    if (!isAllowedVerb) {
+      return { error: `Instruction non autorisée : "${stmt.slice(0, 50)}...".` };
+    }
+
+    cleanStatements.push(stmt);
+  }
+
+  return { statements: cleanStatements };
+}
 
 app.post('/api/audit/apply', (req, res) => {
-  const { sql } = req.body;
-  const trimmed = sql ? sql.trim() : "";
-  const sqlUpper = trimmed.toUpperCase();
+  const { sql: rawSql } = req.body;
+  const validation = splitAndValidateSqlStatements(rawSql);
 
-  if (!sqlUpper.startsWith("UPDATE") && !sqlUpper.startsWith("INSERT") && !sqlUpper.startsWith("DELETE")) {
-    return res.status(400).json({ error: "Seules les requêtes UPDATE, INSERT et DELETE sont autorisées." });
+  if (validation.error) {
+    return res.status(400).json({ error: validation.error });
   }
 
-  const singleStatement = trimmed.replace(/;\s*$/, '');
-  if (singleStatement.includes(';')) {
-    return res.status(400).json({ error: "Une seule requête à la fois est autorisée." });
-  }
-
-  const tableMatch = singleStatement.match(/^(?:UPDATE|DELETE\s+FROM|INSERT\s+INTO)\s+["'`[]?(\w+)["'`\]]?/i);
-  const table = tableMatch ? tableMatch[1].toLowerCase() : null;
-  if (!table || !AUDIT_APPLY_ALLOWED_TABLES.includes(table)) {
-    return res.status(400).json({ error: `Cette correction ne peut cibler que les tables : ${AUDIT_APPLY_ALLOWED_TABLES.join(', ')}.` });
-  }
-
-  if ((sqlUpper.startsWith("UPDATE") || sqlUpper.startsWith("DELETE")) && !/\bWHERE\b/i.test(singleStatement)) {
-    return res.status(400).json({ error: "Une clause WHERE est obligatoire pour une correction UPDATE ou DELETE (pas de modification en masse)." });
-  }
+  const statements = validation.statements;
 
   db.serialize(() => {
     db.run("BEGIN TRANSACTION");
-    db.run(singleStatement, function (err) {
-      if (err) {
-        return db.run("ROLLBACK", () => res.status(500).json({ error: err.message }));
+
+    let totalChanges = 0;
+
+    const executeNext = (index) => {
+      if (index >= statements.length) {
+        return db.run("COMMIT", (commitErr) => {
+          if (commitErr) return res.status(500).json({ error: commitErr.message });
+          res.json({ 
+            success: true, 
+            changes: totalChanges, 
+            statementsCount: statements.length,
+            message: `${statements.length} action(s) exécutée(s) avec succès (${totalChanges} ligne(s) affectée(s)).` 
+          });
+        });
       }
-      const changes = this.changes;
-      if (changes > AUDIT_APPLY_MAX_AFFECTED_ROWS) {
-        return db.run("ROLLBACK", () => res.status(400).json({
-          error: `Correction annulée : ${changes} lignes auraient été affectées (maximum ${AUDIT_APPLY_MAX_AFFECTED_ROWS} pour une correction ciblée). Vérifiez la clause WHERE.`
-        }));
-      }
-      db.run("COMMIT", (commitErr) => {
-        if (commitErr) return res.status(500).json({ error: commitErr.message });
-        res.json({ success: true, changes });
+
+      const stmt = statements[index];
+      db.run(stmt, function (err) {
+        if (err) {
+          return db.run("ROLLBACK", () => res.status(500).json({ error: `Erreur SQL sur [${stmt.slice(0, 40)}...] : ${err.message}` }));
+        }
+        totalChanges += (this.changes || 0);
+        executeNext(index + 1);
       });
-    });
+    };
+
+    executeNext(0);
   });
 });
 
@@ -2618,12 +2712,17 @@ const { performAutoLettrage, performManuelLettrage, cancelLettrage, computeBalan
 app.get('/api/lettrage/non-lettres', async (req, res) => {
   try {
     const account = req.query.account;
+    const { clause, params: exParams } = await getExerciceDateFilter();
     let query = `
       SELECT id, date, code_journal, compte, compte_tiers, libelle, n_facture, reference, debit, credit, statut_lettrage, code_lettrage, date_echeance
       FROM journal
       WHERE (compte LIKE '4%' OR compte_tiers LIKE '4%')
     `;
     const params = [];
+    if (clause) {
+      query += ` AND ${clause}`;
+      params.push(...exParams);
+    }
     if (account) {
       query += ` AND (compte = ? OR compte_tiers = ?)`;
       params.push(account, account);
@@ -2693,13 +2792,15 @@ app.post('/api/relances/enregistrer', async (req, res) => {
 // --- ROUTES RAPPROCHEMENT BANCAIRE ---
 app.get('/api/rapprochement/etat', async (req, res) => {
   try {
+    const { clause, params: exParams } = await getExerciceDateFilter();
+    const exFilter = clause ? `AND ${clause}` : '';
     const statementLines = await db.runSelect(`SELECT * FROM rapprochement_bancaire ORDER BY date_operation DESC`);
     const journalBankLines = await db.runSelect(`
       SELECT id, date, code_journal, compte, libelle, debit, credit, reference, reference_banque
       FROM journal
-      WHERE compte LIKE '52%' OR compte LIKE '56%' OR code_journal = 'BQ'
+      WHERE (compte LIKE '52%' OR compte LIKE '56%' OR code_journal = 'BQ') ${exFilter}
       ORDER BY date DESC
-    `);
+    `, exParams);
     res.json({ statementLines: statementLines || [], journalBankLines: journalBankLines || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });

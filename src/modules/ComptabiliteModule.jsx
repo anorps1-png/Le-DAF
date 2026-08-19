@@ -34,6 +34,10 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [balanceFilter, setBalanceFilter] = useState('');
   const [journalCodes, setJournalCodes] = useState(['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR']);
   const [customAccounts, setCustomAccounts] = useState({});
+  const [journalSearch, setJournalSearch] = useState('');
+  const [journalPage, setJournalPage] = useState(1);
+  const [journalPageSize, setJournalPageSize] = useState(50);
+  const [showAllDates, setShowAllDates] = useState(false);
 
   // --- DSF OHADA STATES ---
   const [dsfSubTab, setDsfSubTab] = useState('controls');
@@ -155,11 +159,12 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     }
   };
 
-  const fetchEtats = async (endpoint) => {
+  const fetchEtats = async (endpoint, forceAll = showAllDates) => {
     setLoading(true);
     setFetchError('');
     try {
-      const res = await fetch(`/api/${endpoint}`);
+      const url = endpoint === 'journal' && forceAll ? '/api/journal?all=1' : `/api/${endpoint}`;
+      const res = await fetch(url);
       const text = await res.text();
       let json = null;
       try {
@@ -198,11 +203,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   };
 
   useEffect(() => {
-    if (activeTab === 'journal') fetchEtats('journal');
+    if (activeTab === 'journal') fetchEtats('journal', showAllDates);
     if (activeTab === 'balance') fetchEtats('balance');
     if (activeTab === 'bilan') fetchEtats('bilan');
     if (activeTab === 'resultat') fetchEtats('resultat');
-  }, [activeTab]);
+  }, [activeTab, showAllDates]);
 
   useEffect(() => {
     if (activeTab !== 'grandlivre') return;
@@ -240,15 +245,28 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   // et scrollée en vue) où elle peut être modifiée ou supprimée.
   const openJournalEntry = (id) => {
     setEditingRowId(null);
+    setJournalSearch(''); // Réinitialise le filtre de recherche pour s'assurer que la ligne est visible
     setHighlightRowId(id);
     setActiveTab('journal');
   };
 
   useEffect(() => {
-    if (activeTab === 'journal' && highlightRowId && data && data.length && highlightedRowRef.current) {
-      highlightedRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (activeTab === 'journal' && highlightRowId && Array.isArray(data) && data.length > 0) {
+      const targetIdx = data.findIndex(r => r.id === highlightRowId || String(r.id) === String(highlightRowId));
+      if (targetIdx !== -1) {
+        if (journalPageSize > 0) {
+          const targetPage = Math.floor(targetIdx / journalPageSize) + 1;
+          setJournalPage(targetPage);
+        }
+        const timer = setTimeout(() => {
+          if (highlightedRowRef.current) {
+            highlightedRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 150);
+        return () => clearTimeout(timer);
+      }
     }
-  }, [activeTab, highlightRowId, data]);
+  }, [activeTab, highlightRowId, data, journalPageSize]);
 
   const startEditRow = (row) => {
     setRowActionStatus('');
@@ -594,7 +612,31 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
           </div>
         );
 
-      case 'journal':
+      case 'journal': {
+        const rawList = Array.isArray(data) ? data : [];
+        const filteredJournal = rawList.filter(row => {
+          if (!journalSearch) return true;
+          const s = journalSearch.toLowerCase();
+          return (
+            (row.compte && String(row.compte).toLowerCase().includes(s)) ||
+            (row.compte_tiers && String(row.compte_tiers).toLowerCase().includes(s)) ||
+            (row.libelle && String(row.libelle).toLowerCase().includes(s)) ||
+            (row.code_journal && String(row.code_journal).toLowerCase().includes(s)) ||
+            (row.n_facture && String(row.n_facture).toLowerCase().includes(s)) ||
+            (row.reference && String(row.reference).toLowerCase().includes(s)) ||
+            (row.date && String(row.date).includes(s))
+          );
+        });
+
+        const totalPages = journalPageSize === 0 ? 1 : Math.ceil(filteredJournal.length / journalPageSize) || 1;
+        const safePage = Math.min(Math.max(1, journalPage), totalPages);
+        const paginatedJournal = journalPageSize === 0 ? filteredJournal : filteredJournal.slice((safePage - 1) * journalPageSize, safePage * journalPageSize);
+
+        const totalJournalDebit = filteredJournal.reduce((acc, r) => acc + (parseFloat(r.debit) || 0), 0);
+        const totalJournalCredit = filteredJournal.reduce((acc, r) => acc + (parseFloat(r.credit) || 0), 0);
+        const journalEcart = Math.round((totalJournalDebit - totalJournalCredit) * 100) / 100;
+        const isJournalEquilibre = Math.abs(journalEcart) < 0.01;
+
         return (
           <div>
             {rowActionStatus && (
@@ -606,6 +648,94 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                 {rowActionStatus}
               </div>
             )}
+
+            {/* Barre de contrôle et recherche ultra-rapide */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem',
+              marginBottom: '1.25rem', padding: '1rem', background: 'var(--color-bg-light)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1, minWidth: '280px' }}>
+                <input
+                  type="text"
+                  className="input"
+                  style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.875rem' }}
+                  placeholder="🔍 Filtrer par compte, libellé, n° facture, date..."
+                  value={journalSearch}
+                  onChange={e => { setJournalSearch(e.target.value); setJournalPage(1); }}
+                />
+                {journalSearch && (
+                  <button className="btn btn-secondary" style={{ padding: '0.4rem 0.6rem' }} onClick={() => setJournalSearch('')}>
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`btn ${showAllDates ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ fontSize: '0.8rem', padding: '0.45rem 0.75rem' }}
+                  onClick={() => setShowAllDates(!showAllDates)}
+                  title="Afficher toutes les écritures sans restriction d'exercice"
+                >
+                  {showAllDates ? '📅 Toutes les dates' : '📅 Filtré par exercice'}
+                </button>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+                  <span>Afficher :</span>
+                  <select
+                    className="input"
+                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.8rem', width: '85px' }}
+                    value={journalPageSize}
+                    onChange={e => { setJournalPageSize(Number(e.target.value)); setJournalPage(1); }}
+                  >
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={250}>250</option>
+                    <option value={500}>500</option>
+                    <option value={0}>Tout</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Synthèse des montants et indicateurs */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem',
+              marginBottom: '1.25rem'
+            }}>
+              <div className="card stat-card" style={{ padding: '0.75rem 1rem' }}>
+                <span className="stat-title" style={{ fontSize: '0.75rem' }}>Total Écritures</span>
+                <span className="stat-value" style={{ fontSize: '1.15rem' }}>
+                  {filteredJournal.length.toLocaleString()} {filteredJournal.length !== rawList.length ? `(sur ${rawList.length})` : ''}
+                </span>
+              </div>
+              <div className="card stat-card" style={{ padding: '0.75rem 1rem' }}>
+                <span className="stat-title" style={{ fontSize: '0.75rem' }}>Total Débit</span>
+                <span className="stat-value" style={{ fontSize: '1.15rem', color: 'var(--color-primary)' }}>
+                  {totalJournalDebit.toLocaleString()} FCFA
+                </span>
+              </div>
+              <div className="card stat-card" style={{ padding: '0.75rem 1rem' }}>
+                <span className="stat-title" style={{ fontSize: '0.75rem' }}>Total Crédit</span>
+                <span className="stat-value" style={{ fontSize: '1.15rem', color: 'var(--color-primary)' }}>
+                  {totalJournalCredit.toLocaleString()} FCFA
+                </span>
+              </div>
+              <div className="card stat-card" style={{
+                padding: '0.75rem 1rem',
+                background: isJournalEquilibre ? 'rgba(34, 197, 94, 0.05)' : 'rgba(239, 68, 68, 0.05)'
+              }}>
+                <span className="stat-title" style={{ fontSize: '0.75rem' }}>Équilibre Débit / Crédit</span>
+                <span className="stat-value" style={{
+                  fontSize: '1.15rem',
+                  color: isJournalEquilibre ? 'var(--color-success)' : 'var(--color-error)'
+                }}>
+                  {isJournalEquilibre ? '✓ Équilibré' : `Écart : ${journalEcart.toLocaleString()} FCFA`}
+                </span>
+              </div>
+            </div>
+
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '1050px' }}>
                 <thead>
@@ -623,85 +753,126 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {(Array.isArray(data) ? data : []).map((row, idx) => {
-                    const isEditing = editingRowId === row.id;
-                    const isHighlighted = highlightRowId === row.id;
-                    return (
-                      <tr
-                        key={idx}
-                        ref={isHighlighted ? highlightedRowRef : null}
-                        style={{
-                          borderBottom: '1px solid rgba(0,0,0,0.05)',
-                          background: isEditing ? 'rgba(59,130,246,0.08)' : isHighlighted ? 'rgba(250, 204, 21, 0.18)' : 'transparent'
-                        }}
-                      >
-                        {isEditing ? (
-                          <>
-                            <td style={{ padding: '0.4rem 0.5rem 0.4rem 0' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '80px' }} value={editRowForm.code_journal} onChange={e => setEditRowForm({ ...editRowForm, code_journal: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input type="date" className="input" style={{ padding: '0.35rem', width: '130px' }} value={editRowForm.date} onChange={e => setEditRowForm({ ...editRowForm, date: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.n_facture} onChange={e => setEditRowForm({ ...editRowForm, n_facture: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.reference} onChange={e => setEditRowForm({ ...editRowForm, reference: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '90px' }} list="chart-of-accounts-list" value={editRowForm.compte} onChange={e => setEditRowForm({ ...editRowForm, compte: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '110px' }} value={editRowForm.compte_tiers} onChange={e => setEditRowForm({ ...editRowForm, compte_tiers: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input className="input" style={{ padding: '0.35rem', width: '180px' }} value={editRowForm.libelle} onChange={e => setEditRowForm({ ...editRowForm, libelle: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input type="number" step="0.01" className="input" style={{ padding: '0.35rem', width: '100px' }} value={editRowForm.debit} onChange={e => setEditRowForm({ ...editRowForm, debit: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem' }}>
-                              <input type="number" step="0.01" className="input" style={{ padding: '0.35rem', width: '100px' }} value={editRowForm.credit} onChange={e => setEditRowForm({ ...editRowForm, credit: e.target.value })} />
-                            </td>
-                            <td style={{ padding: '0.4rem 0.5rem', whiteSpace: 'nowrap' }}>
-                              <button onClick={() => saveEditRow(row.id)} title="Enregistrer" style={{ background: 'none', border: 'none', color: 'var(--color-success)', cursor: 'pointer', padding: '0.3rem' }}>
-                                <CheckCircle size={16} />
-                              </button>
-                              <button onClick={cancelEditRow} title="Annuler" style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', padding: '0.3rem' }}>
-                                <X size={16} />
-                              </button>
-                            </td>
-                          </>
-                        ) : (
-                          <>
-                            <td style={{ padding: '0.75rem 0' }}>{row.code_journal}</td>
-                            <td>{row.date}</td>
-                            <td>{row.n_facture}</td>
-                            <td>{row.reference}</td>
-                            <td style={{ fontWeight: 500 }}>{row.compte}</td>
-                            <td>{row.compte_tiers}</td>
-                            <td>{row.libelle}</td>
-                            <td>{row.debit > 0 ? row.debit.toLocaleString() : '-'}</td>
-                            <td>{row.credit > 0 ? row.credit.toLocaleString() : '-'}</td>
-                            <td style={{ whiteSpace: 'nowrap' }}>
-                              <button onClick={() => startEditRow(row)} title="Modifier" style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', padding: '0.3rem' }}>
-                                <Pencil size={14} />
-                              </button>
-                              <button onClick={() => deleteRow(row.id)} title="Supprimer" style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', padding: '0.3rem' }}>
-                                <Trash2 size={14} />
-                              </button>
-                            </td>
-                          </>
-                        )}
-                      </tr>
-                    );
-                  })}
+                  {paginatedJournal.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} style={{ textAlign: 'center', padding: '3rem', color: 'var(--color-text-muted)' }}>
+                        {loading ? 'Chargement des écritures...' : 'Aucune écriture comptable trouvée.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    paginatedJournal.map((row, idx) => {
+                      const isEditing = editingRowId === row.id;
+                      const isHighlighted = highlightRowId === row.id || String(highlightRowId) === String(row.id);
+                      return (
+                        <tr
+                          key={row.id || idx}
+                          ref={isHighlighted ? highlightedRowRef : null}
+                          style={{
+                            borderBottom: '1px solid rgba(0,0,0,0.05)',
+                            background: isEditing ? 'rgba(59,130,246,0.08)' : isHighlighted ? '#fef3c7' : 'transparent',
+                            boxShadow: isHighlighted ? '0 0 0 2px #d97706 inset' : 'none',
+                            transition: 'all 0.3s ease'
+                          }}
+                        >
+                          {isEditing ? (
+                            <>
+                              <td style={{ padding: '0.4rem 0.5rem 0.4rem 0' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '80px' }} value={editRowForm.code_journal} onChange={e => setEditRowForm({ ...editRowForm, code_journal: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input type="date" className="input" style={{ padding: '0.35rem', width: '130px' }} value={editRowForm.date} onChange={e => setEditRowForm({ ...editRowForm, date: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.n_facture} onChange={e => setEditRowForm({ ...editRowForm, n_facture: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.reference} onChange={e => setEditRowForm({ ...editRowForm, reference: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '90px' }} list="chart-of-accounts-list" value={editRowForm.compte} onChange={e => setEditRowForm({ ...editRowForm, compte: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '110px' }} value={editRowForm.compte_tiers} onChange={e => setEditRowForm({ ...editRowForm, compte_tiers: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input className="input" style={{ padding: '0.35rem', width: '180px' }} value={editRowForm.libelle} onChange={e => setEditRowForm({ ...editRowForm, libelle: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input type="number" step="0.01" className="input" style={{ padding: '0.35rem', width: '100px' }} value={editRowForm.debit} onChange={e => setEditRowForm({ ...editRowForm, debit: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem' }}>
+                                <input type="number" step="0.01" className="input" style={{ padding: '0.35rem', width: '100px' }} value={editRowForm.credit} onChange={e => setEditRowForm({ ...editRowForm, credit: e.target.value })} />
+                              </td>
+                              <td style={{ padding: '0.4rem 0.5rem', whiteSpace: 'nowrap' }}>
+                                <button onClick={() => saveEditRow(row.id)} title="Enregistrer" style={{ background: 'none', border: 'none', color: 'var(--color-success)', cursor: 'pointer', padding: '0.3rem' }}>
+                                  <CheckCircle size={16} />
+                                </button>
+                                <button onClick={cancelEditRow} title="Annuler" style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', padding: '0.3rem' }}>
+                                  <X size={16} />
+                                </button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td style={{ padding: '0.75rem 0' }}>{row.code_journal}</td>
+                              <td>{row.date}</td>
+                              <td>{row.n_facture}</td>
+                              <td>{row.reference}</td>
+                              <td style={{ fontWeight: 500 }}>{row.compte}</td>
+                              <td>{row.compte_tiers}</td>
+                              <td>{row.libelle}</td>
+                              <td>{row.debit > 0 ? Number(row.debit).toLocaleString() : '-'}</td>
+                              <td>{row.credit > 0 ? Number(row.credit).toLocaleString() : '-'}</td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <button onClick={() => startEditRow(row)} title="Modifier" style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', padding: '0.3rem' }}>
+                                  <Pencil size={14} />
+                                </button>
+                                <button onClick={() => deleteRow(row.id)} title="Supprimer" style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', padding: '0.3rem' }}>
+                                  <Trash2 size={14} />
+                                </button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem',
+                marginTop: '1.5rem', padding: '0.75rem 0'
+              }}>
+                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                  Page {safePage} sur {totalPages} ({filteredJournal.length} écritures)
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '0.35rem 0.75rem', fontSize: '0.85rem' }}
+                    disabled={safePage <= 1}
+                    onClick={() => setJournalPage(p => Math.max(1, p - 1))}
+                  >
+                    ← Précédent
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '0.35rem 0.75rem', fontSize: '0.85rem' }}
+                    disabled={safePage >= totalPages}
+                    onClick={() => setJournalPage(p => Math.min(totalPages, p + 1))}
+                  >
+                    Suivant →
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         );
+      }
 
       case 'grandlivre':
         return (

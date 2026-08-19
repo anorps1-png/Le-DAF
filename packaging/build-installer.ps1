@@ -1,5 +1,5 @@
 # ====================================================================
-# SCRIPT DE PRÉPARATION ET GÉNÉRATION DE L'INSTALLATEUR AGENT OHADA (V2.0.0)
+# SCRIPT DE PRÉPARATION ET GÉNÉRATION DE L'INSTALLATEUR ELECTRON AGENT OHADA (V2.0.1)
 # ====================================================================
 
 $ErrorActionPreference = "Stop"
@@ -9,9 +9,10 @@ $stageDir = Join-Path $PSScriptRoot "stage"
 $serverDir = Join-Path $rootDir "server"
 $distDir = Join-Path $rootDir "dist"
 $outputDir = Join-Path $rootDir "installer-output"
+$electronDist = Join-Path $rootDir "node_modules\electron\dist"
 
 Write-Host "=====================================================" -ForegroundColor Cyan
-Write-Host " Preparation du Bundle Installateur Agent OHADA V2" -ForegroundColor Cyan
+Write-Host " Preparation du Bundle Installateur Electron Agent OHADA" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 
 # 1. Compilation Frontend Vite
@@ -28,28 +29,38 @@ if (Test-Path $serverPublic) {
 New-Item -ItemType Directory -Path $serverPublic | Out-Null
 Copy-Item "$distDir\*" $serverPublic -Recurse -Force
 
-# 3. Préparation du dossier d'étape packaging/stage
-Write-Host "`n[3/5] Nettoyage et creation du dossier packaging/stage..." -ForegroundColor Yellow
+# 3. Préparation du dossier d'étape packaging/stage avec le runtime Electron
+Write-Host "`n[3/5] Nettoyage et initialisation du runtime Electron dans packaging/stage..." -ForegroundColor Yellow
 if (Test-Path $stageDir) {
     Remove-Item $stageDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $stageDir | Out-Null
 
-# 4. Copie de Node.exe et des scripts VBS
-Write-Host "`n[4/5] Ingestion de Node.exe et des lanceurs VBS..." -ForegroundColor Yellow
-$nodePath = (Get-Command node).Source
-Copy-Item $nodePath (Join-Path $stageDir "node.exe") -Force
-Copy-Item (Join-Path $PSScriptRoot "launch.vbs") $stageDir -Force
-Copy-Item (Join-Path $PSScriptRoot "stop.vbs") $stageDir -Force
+# Copie des fichiers binaires Electron
+Copy-Item "$electronDist\*" $stageDir -Recurse -Force
 
-# Copie du serveur Express (sans les fichiers de test volumineux)
-$stageServer = Join-Path $stageDir "server"
-New-Item -ItemType Directory -Path $stageServer -Force | Out-Null
+# Renommer electron.exe en AgentOHADA.exe
+$targetExe = Join-Path $stageDir "AgentOHADA.exe"
+if (Test-Path (Join-Path $stageDir "electron.exe")) {
+    Rename-Item (Join-Path $stageDir "electron.exe") $targetExe -Force
+}
 
-robocopy $serverDir $stageServer /E /XF "agent-ohada.sqlite*" "test_*.js" "*.pdf" "*.xlsx" /MT:16 /NP /NDL /NFL /NJH /NJS
+# 4. Ingestion de l'application dans resources/app
+Write-Host "`n[4/5] Ingestion du code applicatif dans resources/app..." -ForegroundColor Yellow
+$appDir = Join-Path $stageDir "resources\app"
+New-Item -ItemType Directory -Path $appDir -Force | Out-Null
+
+Copy-Item (Join-Path $rootDir "package.json") $appDir -Force
+Copy-Item (Join-Path $rootDir "electron") $appDir -Recurse -Force
+Copy-Item (Join-Path $rootDir "dist") $appDir -Recurse -Force
+
+# Copie du serveur Express
+$appServer = Join-Path $appDir "server"
+New-Item -ItemType Directory -Path $appServer -Force | Out-Null
+robocopy $serverDir $appServer /E /XF "agent-ohada.sqlite*" "test_*.js" "*.pdf" "*.xlsx" /MT:16 /NP /NDL /NFL /NJH /NJS
 if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
 
-# 5. Résumé et Compilation Inno Setup
+# 5. Compilation Inno Setup
 Write-Host "`n[5/5] Compilation de l'installateur Windows AgentOHADA-Setup.exe..." -ForegroundColor Yellow
 
 $isccPaths = @(
@@ -67,7 +78,7 @@ if ($isccExe) {
     
     $finalExe = Join-Path $outputDir "AgentOHADA-Setup.exe"
     if (Test-Path $finalExe) {
-        Write-Host "`nINSTALLATEUR EXECUTION GENEREE AVEC SUCCES !" -ForegroundColor Green
+        Write-Host "`nINSTALLATEUR ELECTRON .EXE GENERE AVEC SUCCES !" -ForegroundColor Green
         Write-Host "Fichier disponible : $finalExe" -ForegroundColor White
     }
 } else {

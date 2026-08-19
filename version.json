@@ -1,6 +1,6 @@
 {
-  "version": "2.0.1",
+  "version": "2.0.2",
   "releaseDate": "2026-08-18",
   "downloadUrl": "https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentOHADA-Setup.exe",
-  "releaseNotes": "Version 2.0.1 : Affichage intégral des écritures du Journal (100k+ lignes), indexation SQLite ultra-rapide, port 3003 en fenêtre dédiée autonome et synchronisation incrémentielle Supabase."
+  "releaseNotes": "Version 2.0.2 : Agent IA avec tous les pouvoirs de correction, saisie en partie double et audit sous autorisation humaine préalable. Nettoyage et assainissement SQL robustes."
 }
