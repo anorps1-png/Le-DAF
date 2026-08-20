@@ -25,6 +25,8 @@ try {
       console.log('Connected to the SQLite database.');
       
       // Activer le mode WAL et optimisations de performance SQLite (ultra rapide)
+      db.configure("busyTimeout", 30000);
+      db.run("PRAGMA busy_timeout = 30000;");
       db.run("PRAGMA journal_mode = WAL;");
       db.run("PRAGMA synchronous = NORMAL;");
       db.run("PRAGMA temp_store = MEMORY;");

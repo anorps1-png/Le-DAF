@@ -117,211 +117,14 @@ async function performSync(force = false, isFullSync = false) {
   let pushedCount = 0;
   let pulledCount = 0;
 
-  try {
-    // -------------------------------------------------------------
-    // PHASE 1 : PUSH (Envoi des modifications et suppressions locales vers Supabase)
-    // -------------------------------------------------------------
-
-    // 0) PUSH DELETES : Répercussion des suppressions locales vers Supabase
-    try {
-      const pendingDeletes = await db.runSelect(
-        "SELECT id, table_name, record_id FROM deleted_records WHERE synced_at IS NULL"
-      );
-
-      if (pendingDeletes && pendingDeletes.length > 0) {
-        const tableGroups = {};
-        for (const d of pendingDeletes) {
-          if (!tableGroups[d.table_name]) tableGroups[d.table_name] = [];
-          tableGroups[d.table_name].push(d);
-        }
-
-        for (const [tbl, list] of Object.entries(tableGroups)) {
-          const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
-          const chunks = chunkArray(list, 100);
-          for (const chunk of chunks) {
-            const idsToDelete = chunk.map(item => tbl === 'chart_of_accounts' ? String(item.record_id) : Number(item.record_id));
-            const { error } = await client.from(tbl).delete().in(idCol, idsToDelete);
-            if (!error) {
-              const syncIds = chunk.map(c => c.id);
-              const placeholders = syncIds.map(() => '?').join(',');
-              await db.runUpdate(`UPDATE deleted_records SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, syncIds);
-              pushedCount += chunk.length;
-            } else {
-              console.warn(`Delete sync warning for ${tbl}:`, error.message);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Deletes to Supabase:", e);
-    }
-
-    // A) Journal
-    try {
-      const unsyncedJournal = await db.runSelect(
-        `SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id
-         FROM journal
-         WHERE synced_at IS NULL OR updated_at > synced_at`
-      );
-
-      if (unsyncedJournal && unsyncedJournal.length > 0) {
-        const chunks = chunkArray(unsyncedJournal, 100);
-        for (const chunk of chunks) {
-          const payload = chunk.map(r => ({
-            id: r.id,
-            code_journal: r.code_journal || '',
-            poste_budgetaire: r.poste_budgetaire || '',
-            date: r.date || '',
-            compte: r.compte || '',
-            compte_tiers: r.compte_tiers || '',
-            libelle: r.libelle || '',
-            n_facture: r.n_facture || '',
-            reference: r.reference || '',
-            debit: Number(r.debit) || 0,
-            credit: Number(r.credit) || 0,
-            piece_id: r.piece_id || null,
-            updated_at: new Date().toISOString()
-          }));
-
-          const { error } = await client.from('journal').upsert(payload, { onConflict: 'id' });
-          if (!error) {
-            const ids = chunk.map(r => r.id);
-            const placeholders = ids.map(() => '?').join(',');
-            await db.runUpdate(`UPDATE journal SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-            pushedCount += chunk.length;
-          } else {
-            console.warn("Journal Push warning:", error.message);
-          }
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Journal:", e);
-    }
-
-    // B) Tiers
-    try {
-      const unsyncedTiers = await db.runSelect(
-        "SELECT id, type, nom, compte_comptable, solde, statut FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at"
-      );
-
-      if (unsyncedTiers && unsyncedTiers.length > 0) {
-        const chunks = chunkArray(unsyncedTiers, 100);
-        for (const chunk of chunks) {
-          const payload = chunk.map(r => ({
-            id: r.id,
-            type: r.type || 'Client',
-            nom: r.nom || '',
-            compte_comptable: r.compte_comptable || '',
-            solde: Number(r.solde) || 0,
-            statut: r.statut || 'Actif',
-            updated_at: new Date().toISOString()
-          }));
-
-          const { error } = await client.from('tiers').upsert(payload, { onConflict: 'nom' });
-          if (!error) {
-            const ids = chunk.map(r => r.id);
-            const placeholders = ids.map(() => '?').join(',');
-            await db.runUpdate(`UPDATE tiers SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-            pushedCount += chunk.length;
-          } else {
-            console.warn("Tiers Push warning:", error.message);
-          }
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Tiers:", e);
-    }
-
-    // C) Exercices
-    try {
-      const unsyncedExercices = await db.runSelect(
-        "SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at"
-      );
-
-      if (unsyncedExercices && unsyncedExercices.length > 0) {
-        const payload = unsyncedExercices.map(r => ({
-          id: r.id,
-          libelle: r.libelle,
-          date_debut: r.date_debut,
-          date_fin: r.date_fin,
-          updated_at: new Date().toISOString()
-        }));
-
-        const { error } = await client.from('exercices').upsert(payload, { onConflict: 'id' });
-        if (!error) {
-          const ids = unsyncedExercices.map(r => r.id);
-          const placeholders = ids.map(() => '?').join(',');
-          await db.runUpdate(`UPDATE exercices SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-          pushedCount += unsyncedExercices.length;
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Exercices:", e);
-    }
-
-    // D) Chart of Accounts
-    try {
-      const unsyncedAccounts = await db.runSelect(
-        "SELECT compte, libelle, source_doc_id FROM chart_of_accounts WHERE synced_at IS NULL OR updated_at > synced_at"
-      );
-      if (unsyncedAccounts && unsyncedAccounts.length > 0) {
-        const payload = unsyncedAccounts.map(r => ({
-          compte: r.compte,
-          libelle: r.libelle,
-          source_doc_id: r.source_doc_id || null,
-          updated_at: new Date().toISOString()
-        }));
-        const { error } = await client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' });
-        if (!error) {
-          const comptes = unsyncedAccounts.map(r => r.compte);
-          const placeholders = comptes.map(() => '?').join(',');
-          await db.runUpdate(`UPDATE chart_of_accounts SET synced_at = CURRENT_TIMESTAMP WHERE compte IN (${placeholders})`, comptes);
-          pushedCount += unsyncedAccounts.length;
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Accounts:", e);
-    }
-
-    // E) Business Rules
-    try {
-      const unsyncedRules = await db.runSelect(
-        "SELECT id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active FROM business_rules WHERE synced_at IS NULL OR updated_at > synced_at"
-      );
-      if (unsyncedRules && unsyncedRules.length > 0) {
-        const payload = unsyncedRules.map(r => ({
-          id: r.id,
-          pattern: r.pattern,
-          condition_type: r.condition_type || 'contains',
-          target_account: r.target_account,
-          target_journal: r.target_journal,
-          vat_rate: Number(r.vat_rate) || 0,
-          confidence_score: Number(r.confidence_score) || 1.0,
-          auto_learned: r.auto_learned || 0,
-          description: r.description || '',
-          is_active: r.is_active !== undefined ? r.is_active : 1,
-          updated_at: new Date().toISOString()
-        }));
-        const { error } = await client.from('business_rules').upsert(payload, { onConflict: 'id' });
-        if (!error) {
-          const ids = unsyncedRules.map(r => r.id);
-          const placeholders = ids.map(() => '?').join(',');
-          await db.runUpdate(`UPDATE business_rules SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
-          pushedCount += unsyncedRules.length;
-        }
-      }
-    } catch (e) {
-      console.error("Error PUSH Rules:", e);
-    }
-
     // -----------------------------------------------------------------
-    // PHASE 2 : PULL (Rapatriement des données Supabase vers le local)
+    // PHASE 1 : PULL (Rapatriement PRIORITAIRE des données Supabase vers le local)
     // -----------------------------------------------------------------
 
-    // A) PULL Journal depuis Supabase (Incrémentiel via updated_at & Transactions SQLite ultra-rapides)
+    // A) PULL Journal depuis Supabase (Incrémentiel via updated_at ou complet si force=true)
     try {
       const lastPullRows = await db.runSelect("SELECT value FROM settings WHERE key = 'LAST_JOURNAL_PULL_AT'");
-      const lastPullAt = (lastPullRows && lastPullRows[0]) ? lastPullRows[0].value : null;
+      const lastPullAt = (force || isFullSync) ? null : ((lastPullRows && lastPullRows[0]) ? lastPullRows[0].value : null);
 
       const localCountRows = await db.runSelect("SELECT COUNT(*) as count FROM journal");
       const localCount = (localCountRows && localCountRows[0]) ? localCountRows[0].count : 0;
@@ -329,11 +132,11 @@ async function performSync(force = false, isFullSync = false) {
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
-      let latestUpdatedTimestamp = lastPullAt;
+      let latestUpdatedTimestamp = null;
 
       while (hasMore) {
         let query = client.from('journal').select('*');
-        if (localCount > 0 && lastPullAt && !isFullSync) {
+        if (localCount > 0 && lastPullAt) {
           query = query.gt('updated_at', lastPullAt).order('updated_at', { ascending: true });
         } else {
           query = query.order('id', { ascending: true });
@@ -474,7 +277,7 @@ async function performSync(force = false, isFullSync = false) {
       console.error("Error PULL Accounts:", e);
     }
 
-    // E) Business rules
+    // E) PULL Business rules
     try {
       const { data: remoteRules, error: brErr } = await client
         .from('business_rules')
@@ -492,6 +295,202 @@ async function performSync(force = false, isFullSync = false) {
       }
     } catch (e) {
       console.error("Error PULL Rules:", e);
+    }
+
+    // -------------------------------------------------------------
+    // PHASE 2 : PUSH (Envoi des modifications locales vers Supabase)
+    // -------------------------------------------------------------
+
+    // 0) PUSH DELETES
+    try {
+      const pendingDeletes = await db.runSelect(
+        "SELECT id, table_name, record_id FROM deleted_records WHERE synced_at IS NULL"
+      );
+
+      if (pendingDeletes && pendingDeletes.length > 0) {
+        const tableGroups = {};
+        for (const d of pendingDeletes) {
+          if (!tableGroups[d.table_name]) tableGroups[d.table_name] = [];
+          tableGroups[d.table_name].push(d);
+        }
+
+        for (const [tbl, list] of Object.entries(tableGroups)) {
+          const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
+          const chunks = chunkArray(list, 500);
+          for (const chunk of chunks) {
+            const idsToDelete = chunk.map(item => tbl === 'chart_of_accounts' ? String(item.record_id) : Number(item.record_id));
+            const { error } = await client.from(tbl).delete().in(idCol, idsToDelete);
+            if (!error) {
+              const syncIds = chunk.map(c => c.id);
+              const placeholders = syncIds.map(() => '?').join(',');
+              await db.runUpdate(`UPDATE deleted_records SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, syncIds);
+              pushedCount += chunk.length;
+            } else {
+              console.warn(`Delete sync warning for ${tbl}:`, error.message);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Deletes to Supabase:", e);
+    }
+
+    // A) PUSH Journal
+    try {
+      const unsyncedJournal = await db.runSelect(
+        `SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id
+         FROM journal
+         WHERE synced_at IS NULL OR updated_at > synced_at`
+      );
+
+      if (unsyncedJournal && unsyncedJournal.length > 0) {
+        const chunks = chunkArray(unsyncedJournal, 500);
+        for (const chunk of chunks) {
+          const payload = chunk.map(r => ({
+            id: r.id,
+            code_journal: r.code_journal || '',
+            poste_budgetaire: r.poste_budgetaire || '',
+            date: r.date || '',
+            compte: r.compte || '',
+            compte_tiers: r.compte_tiers || '',
+            libelle: r.libelle || '',
+            n_facture: r.n_facture || '',
+            reference: r.reference || '',
+            debit: Number(r.debit) || 0,
+            credit: Number(r.credit) || 0,
+            piece_id: r.piece_id || null,
+            updated_at: new Date().toISOString()
+          }));
+
+          const { error } = await client.from('journal').upsert(payload, { onConflict: 'id' });
+          if (!error) {
+            const ids = chunk.map(r => r.id);
+            const placeholders = ids.map(() => '?').join(',');
+            await db.runUpdate(`UPDATE journal SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+            pushedCount += chunk.length;
+          } else {
+            console.warn("Journal Push warning:", error.message);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Journal:", e);
+    }
+
+    // B) PUSH Tiers
+    try {
+      const unsyncedTiers = await db.runSelect(
+        "SELECT id, type, nom, compte_comptable, solde, statut FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at"
+      );
+
+      if (unsyncedTiers && unsyncedTiers.length > 0) {
+        const chunks = chunkArray(unsyncedTiers, 500);
+        for (const chunk of chunks) {
+          const payload = chunk.map(r => ({
+            id: r.id,
+            type: r.type || 'Client',
+            nom: r.nom || '',
+            compte_comptable: r.compte_comptable || '',
+            solde: Number(r.solde) || 0,
+            statut: r.statut || 'Actif',
+            updated_at: new Date().toISOString()
+          }));
+
+          const { error } = await client.from('tiers').upsert(payload, { onConflict: 'nom' });
+          if (!error) {
+            const ids = chunk.map(r => r.id);
+            const placeholders = ids.map(() => '?').join(',');
+            await db.runUpdate(`UPDATE tiers SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+            pushedCount += chunk.length;
+          } else {
+            console.warn("Tiers Push warning:", error.message);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Tiers:", e);
+    }
+
+    // C) PUSH Exercices
+    try {
+      const unsyncedExercices = await db.runSelect(
+        "SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at"
+      );
+
+      if (unsyncedExercices && unsyncedExercices.length > 0) {
+        const payload = unsyncedExercices.map(r => ({
+          id: r.id,
+          libelle: r.libelle,
+          date_debut: r.date_debut,
+          date_fin: r.date_fin,
+          updated_at: new Date().toISOString()
+        }));
+
+        const { error } = await client.from('exercices').upsert(payload, { onConflict: 'id' });
+        if (!error) {
+          const ids = unsyncedExercices.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE exercices SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+          pushedCount += unsyncedExercices.length;
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Exercices:", e);
+    }
+
+    // D) PUSH Chart of Accounts
+    try {
+      const unsyncedAccounts = await db.runSelect(
+        "SELECT compte, libelle, source_doc_id FROM chart_of_accounts WHERE synced_at IS NULL OR updated_at > synced_at"
+      );
+      if (unsyncedAccounts && unsyncedAccounts.length > 0) {
+        const payload = unsyncedAccounts.map(r => ({
+          compte: r.compte,
+          libelle: r.libelle,
+          source_doc_id: r.source_doc_id || null,
+          updated_at: new Date().toISOString()
+        }));
+        const { error } = await client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' });
+        if (!error) {
+          const comptes = unsyncedAccounts.map(r => r.compte);
+          const placeholders = comptes.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE chart_of_accounts SET synced_at = CURRENT_TIMESTAMP WHERE compte IN (${placeholders})`, comptes);
+          pushedCount += unsyncedAccounts.length;
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Accounts:", e);
+    }
+
+    // E) PUSH Business Rules
+    try {
+      const unsyncedRules = await db.runSelect(
+        "SELECT id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active FROM business_rules WHERE synced_at IS NULL OR updated_at > synced_at"
+      );
+      if (unsyncedRules && unsyncedRules.length > 0) {
+        const payload = unsyncedRules.map(r => ({
+          id: r.id,
+          pattern: r.pattern,
+          condition_type: r.condition_type || 'contains',
+          target_account: r.target_account,
+          target_journal: r.target_journal,
+          vat_rate: Number(r.vat_rate) || 0,
+          confidence_score: Number(r.confidence_score) || 1.0,
+          auto_learned: r.auto_learned || 0,
+          description: r.description || '',
+          is_active: r.is_active !== undefined ? r.is_active : 1,
+          updated_at: new Date().toISOString()
+        }));
+        const { error } = await client.from('business_rules').upsert(payload, { onConflict: 'id' });
+        if (!error) {
+          const ids = unsyncedRules.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          await db.runUpdate(`UPDATE business_rules SET synced_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`, ids);
+          pushedCount += unsyncedRules.length;
+        }
+      }
+    } catch (e) {
+      console.error("Error PUSH Rules:", e);
     }
 
     // Log & status report
