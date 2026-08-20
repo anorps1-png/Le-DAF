@@ -117,6 +117,7 @@ async function performSync(force = false, isFullSync = false) {
   let pushedCount = 0;
   let pulledCount = 0;
 
+  try {
     // -----------------------------------------------------------------
     // PHASE 1 : PULL (Rapatriement PRIORITAIRE des données Supabase vers le local)
     // -----------------------------------------------------------------
