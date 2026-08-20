@@ -7,7 +7,7 @@ const { PDFParse } = require('pdf-parse');
 const db = require('./db');
 const { askAI, matchTransactionWithMemory, learnFromJournalData, friendlyAiErrorMessage } = require('./ai');
 const { computeEtatsFinanciers } = require('./ohadaRules');
-const { getSyncSettings, getPendingLocalCount, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
+const { getSyncSettings, getPendingLocalCount, performPush, performPull, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
 
 const path = require('path');
 const fs = require('fs');
@@ -929,7 +929,7 @@ app.put('/api/journal/:id', async (req, res) => {
       return res.status(400).json({ error: 'Compte, libellé et date sont obligatoires.' });
     }
     const result = await db.runUpdate(
-      `UPDATE journal SET code_journal=?, poste_budgetaire=?, date=?, compte=?, compte_tiers=?, libelle=?, n_facture=?, reference=?, debit=?, credit=? WHERE id=?`,
+      `UPDATE journal SET code_journal=?, poste_budgetaire=?, date=?, compte=?, compte_tiers=?, libelle=?, n_facture=?, reference=?, debit=?, credit=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
       [code_journal || '', poste_budgetaire || '', date, compte, compte_tiers || '', libelle, n_facture || '', reference || '', Number(debit) || 0, Number(credit) || 0, id]
     );
     if (result.changes === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
@@ -951,6 +951,11 @@ app.delete('/api/journal/:id', async (req, res) => {
     const { id } = req.params;
     const result = await db.runUpdate('DELETE FROM journal WHERE id=?', [id]);
     if (result.changes === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
+    try {
+      await db.runUpdate("INSERT INTO deleted_records (table_name, record_id) VALUES ('journal', ?)", [String(id)]);
+    } catch (e) {
+      console.warn("Deleted records log error:", e.message);
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2509,6 +2514,25 @@ app.get('/api/sync/status', async (req, res) => {
       pendingCount,
       lastLog
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sync/push', async (req, res) => {
+  try {
+    const result = await performPush();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sync/pull', async (req, res) => {
+  try {
+    const force = req.body && req.body.force === true;
+    const result = await performPull(force);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

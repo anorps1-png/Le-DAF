@@ -36,6 +36,11 @@ if (Test-Path $stageDir) {
 }
 New-Item -ItemType Directory -Path $stageDir | Out-Null
 
+# Extraction du runtime Electron si absent
+if (-not (Test-Path $electronDist)) {
+    node (Join-Path $PSScriptRoot "extract_electron.cjs")
+}
+
 # Copie des fichiers binaires Electron
 Copy-Item "$electronDist\*" $stageDir -Recurse -Force
 
@@ -58,6 +63,13 @@ Copy-Item (Join-Path $rootDir "dist") $appDir -Recurse -Force
 $appServer = Join-Path $appDir "server"
 New-Item -ItemType Directory -Path $appServer -Force | Out-Null
 robocopy $serverDir $appServer /E /XF "agent-ohada.sqlite*" "test_*.js" "*.pdf" "*.xlsx" /MT:16 /NP /NDL /NFL /NJH /NJS
+if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
+
+# Copie des dependances applicatives node_modules vers resources/app/node_modules
+Write-Host "Copie des dependances node_modules vers resources/app/node_modules..." -ForegroundColor Cyan
+$appNodeModules = Join-Path $appDir "node_modules"
+$rootNodeModules = Join-Path $rootDir "node_modules"
+robocopy $rootNodeModules $appNodeModules /E /XD "electron" "innosetup" "vite" "oxlint" "esbuild" "rolldown" "@esbuild" /MT:16 /NP /NDL /NFL /NJH /NJS
 if ($LASTEXITCODE -le 7) { $global:LASTEXITCODE = 0 }
 
 # 5. Compilation Inno Setup

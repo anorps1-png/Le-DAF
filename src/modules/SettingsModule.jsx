@@ -161,16 +161,42 @@ export const SettingsModule = () => {
     fetchSyncStatus();
   };
 
-  const handleManualSync = async () => {
-    setIsSyncing(true);
+  const [isPushing, setIsPushing] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
+  const [lastActionResult, setLastActionResult] = useState(null);
+
+  const handlePush = async () => {
+    setIsPushing(true);
+    setLastActionResult(null);
     try {
-      const res = await fetch('/api/sync/trigger', { method: 'POST' });
+      const res = await fetch('/api/sync/push', { method: 'POST' });
       const data = await res.json();
-      setSyncStatus(prev => ({ ...prev, lastLog: { message: data.message, status: data.status } }));
+      setLastActionResult(data);
     } catch (e) {
       console.error(e);
+      setLastActionResult({ status: 'error', message: 'Erreur lors du PUSH : ' + e.message });
     } finally {
-      setIsSyncing(false);
+      setIsPushing(false);
+      fetchSyncStatus();
+    }
+  };
+
+  const handlePull = async (force = false) => {
+    setIsPulling(true);
+    setLastActionResult(null);
+    try {
+      const res = await fetch('/api/sync/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force })
+      });
+      const data = await res.json();
+      setLastActionResult(data);
+    } catch (e) {
+      console.error(e);
+      setLastActionResult({ status: 'error', message: 'Erreur lors du PULL : ' + e.message });
+    } finally {
+      setIsPulling(false);
       fetchSyncStatus();
     }
   };
@@ -185,36 +211,79 @@ export const SettingsModule = () => {
           Synchronisation Supabase (Cloud & Offline-First)
         </h3>
 
+        {/* COMMANDES DE SYNCHRONISATION MANUELLE (PUSH & PULL) */}
         <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)', marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>
-              Mode de synchronisation :
-            </span>
+          <h4 style={{ margin: '0 0 0.75rem 0', fontSize: '0.95rem', color: 'var(--color-primary-dark)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Database size={18} />
+            Commandes de Synchronisation Manuelle
+          </h4>
+          <p style={{ margin: '0 0 1rem 0', fontSize: '0.8rem', color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+            Le mode automatique est désactivé pour un contrôle total. Utilisez les boutons ci-dessous pour envoyer vos modifications vers Supabase ou télécharger les nouveautés distantes.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
             <button
-              className={`btn ${supabaseConfig.autoSync ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setSupabaseConfig({ ...supabaseConfig, autoSync: !supabaseConfig.autoSync })}
+              className="btn btn-primary"
+              onClick={handlePush}
+              disabled={isPushing || isPulling}
               style={{
+                background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
+                color: '#fff',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '0.4rem',
-                fontSize: '0.85rem',
-                background: supabaseConfig.autoSync ? 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)' : '#e2e8f0',
-                borderColor: supabaseConfig.autoSync ? '#15803d' : '#cbd5e1',
-                color: supabaseConfig.autoSync ? '#fff' : '#475569'
+                justifyContent: 'center',
+                gap: '0.5rem',
+                padding: '0.75rem 1rem',
+                fontWeight: 600
               }}
             >
-              {supabaseConfig.autoSync ? <Cloud size={16} /> : <CloudOff size={16} />}
-              {supabaseConfig.autoSync ? 'Auto-Sync Activé' : 'Mode 100% Local (Sync Désactivé)'}
+              <ArrowUpCircle size={18} className={isPushing ? 'spin' : ''} />
+              {isPushing ? 'Envoi PUSH en cours...' : 'PUSH (Envoyer)'}
+            </button>
+
+            <button
+              className="btn btn-secondary"
+              onClick={() => handlePull(false)}
+              disabled={isPushing || isPulling}
+              style={{
+                background: 'linear-gradient(135deg, #4f46e5 0%, #4338ca 100%)',
+                borderColor: '#4338ca',
+                color: '#fff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.5rem',
+                padding: '0.75rem 1rem',
+                fontWeight: 600
+              }}
+            >
+              <Download size={18} className={isPulling ? 'spin' : ''} />
+              {isPulling ? 'Téléchargement PULL...' : 'PULL (Télécharger)'}
             </button>
           </div>
 
-          <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
-            {supabaseConfig.autoSync ? (
-              '⚡ Vos travaux sont sauvegardés en local puis envoyés automatiquement sur Supabase dès qu\'Internet est disponible.'
-            ) : (
-              '🔒 Vos données restent exclusivement stockées sur votre PC dans SQLite. Aucune synchronisation distante.'
-            )}
-          </p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.8rem' }}>
+            <span>Écritures locales en attente d'envoi (PUSH) :</span>
+            <span style={{
+              background: syncStatus?.pendingCount > 0 ? '#fef3c7' : '#dcfce7',
+              color: syncStatus?.pendingCount > 0 ? '#92400e' : '#166534',
+              padding: '0.2rem 0.6rem',
+              borderRadius: '1rem',
+              fontWeight: 700
+            }}>
+              {syncStatus?.pendingCount || 0} en attente
+            </span>
+          </div>
+
+          <div style={{ marginTop: '0.75rem', textAlign: 'right' }}>
+            <button
+              onClick={() => handlePull(true)}
+              disabled={isPushing || isPulling}
+              style={{ background: 'none', border: 'none', color: '#6366f1', textDecoration: 'underline', cursor: 'pointer', fontSize: '0.75rem' }}
+            >
+              ⚡ Forcer un PULL complet de toutes les tables
+            </button>
+          </div>
         </div>
 
         <div style={{ marginBottom: '1.25rem' }}>
@@ -245,15 +314,7 @@ export const SettingsModule = () => {
 
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
           <button className="btn btn-primary" onClick={handleSaveSupabase} style={{ flex: 1 }}>
-            <Save size={16} /> Enregistrer Supabase
-          </button>
-          <button 
-            className="btn btn-secondary" 
-            onClick={handleManualSync} 
-            disabled={isSyncing}
-            style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-          >
-            <RefreshCw size={16} className={isSyncing ? 'spin' : ''} /> ⚡ Synchroniser
+            <Save size={16} /> Enregistrer la Configuration Supabase
           </button>
         </div>
 
@@ -263,19 +324,30 @@ export const SettingsModule = () => {
           </div>
         )}
 
-        {syncStatus && (
-          <div style={{ padding: '0.75rem', background: '#f1f5f9', borderRadius: 'var(--radius-md)', fontSize: '0.8rem', border: '1px solid var(--color-border)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-              <span>Modifications locales en attente :</span>
-              <strong style={{ color: syncStatus.pendingCount > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>
-                {syncStatus.pendingCount} écriture(s)
-              </strong>
-            </div>
-            {syncStatus.lastLog && (
-              <div style={{ color: 'var(--color-text-muted)', marginTop: '0.25rem', fontSize: '0.75rem' }}>
-                Dernier statut : {syncStatus.lastLog.message}
+        {lastActionResult && (
+          <div style={{
+            padding: '0.75rem',
+            background: lastActionResult.status === 'success' ? '#ecfdf5' : '#fef2f2',
+            borderRadius: 'var(--radius-md)',
+            fontSize: '0.8rem',
+            border: `1px solid ${lastActionResult.status === 'success' ? '#a7f3d0' : '#fecaca'}`,
+            color: lastActionResult.status === 'success' ? '#065f46' : '#991b1b',
+            marginBottom: '1rem'
+          }}>
+            <strong>{lastActionResult.message}</strong>
+            {lastActionResult.details && (
+              <div style={{ fontSize: '0.75rem', marginTop: '0.3rem', opacity: 0.9 }}>
+                Détails : {JSON.stringify(lastActionResult.details)}
               </div>
             )}
+          </div>
+        )}
+
+        {syncStatus && syncStatus.lastLog && (
+          <div style={{ padding: '0.75rem', background: '#f1f5f9', borderRadius: 'var(--radius-md)', fontSize: '0.8rem', border: '1px solid var(--color-border)' }}>
+            <div style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>
+              Dernier journal : {syncStatus.lastLog.message} ({syncStatus.lastLog.timestamp || 'Récents'})
+            </div>
           </div>
         )}
 

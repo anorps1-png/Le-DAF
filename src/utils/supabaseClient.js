@@ -39,6 +39,20 @@ export const saveSupabaseConfig = ({ url, key, autoSync }) => {
   clientInstance = null;
 };
 
+export const triggerPushApi = async () => {
+  const res = await fetch('/api/sync/push', { method: 'POST' });
+  return await res.json();
+};
+
+export const triggerPullApi = async (force = false) => {
+  const res = await fetch('/api/sync/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force })
+  });
+  return await res.json();
+};
+
 export const getSupabaseClient = () => {
   const { url, key } = getSupabaseConfig();
   if (!url || !key) {

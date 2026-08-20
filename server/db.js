@@ -155,6 +155,14 @@ try {
           pulled_count INTEGER DEFAULT 0
         )`);
 
+        db.run(`CREATE TABLE IF NOT EXISTS deleted_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_name TEXT,
+          record_id TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          synced_at DATETIME
+        )`);
+
         db.run(`CREATE TABLE IF NOT EXISTS statement_lines (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           date_operation TEXT NOT NULL,
