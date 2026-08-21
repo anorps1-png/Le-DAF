@@ -5,11 +5,26 @@ const fs = require('fs');
 const path = require('path');
 
 async function getSettings() {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     db.all("SELECT key, value FROM settings", (err, rows) => {
-      if (err) reject(err);
+      if (err) rows = [];
       const settings = {};
-      rows.forEach(r => settings[r.key] = r.value);
+      (rows || []).forEach(r => { if (r && r.key) settings[r.key] = r.value; });
+
+      // Priorité aux variables d'environnement sur Vercel / Cloud si définies
+      settings.DEFAULT_AI = (process.env.DEFAULT_AI || process.env.LLM_PROVIDER || settings.DEFAULT_AI || 'gemini').toLowerCase().trim();
+      settings.GEMINI_API_KEY = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || settings.GEMINI_API_KEY || '').trim();
+      settings.GEMINI_MODEL = (process.env.GEMINI_MODEL || settings.GEMINI_MODEL || 'gemini-1.5-flash').trim();
+
+      settings.OPENAI_API_KEY = (process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || settings.OPENAI_API_KEY || '').trim();
+      settings.OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || process.env.LLM_BASE_URL || settings.OPENAI_BASE_URL || '').trim();
+      settings.OPENAI_MODEL = (process.env.OPENAI_MODEL || process.env.LLM_MODEL || settings.OPENAI_MODEL || 'gpt-3.5-turbo').trim();
+
+      settings.DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY || settings.DEEPSEEK_API_KEY || '').trim();
+      settings.DEEPSEEK_MODEL = (process.env.DEEPSEEK_MODEL || settings.DEEPSEEK_MODEL || 'deepseek-chat').trim();
+
+      settings.GROQ_API_KEY = (process.env.GROQ_API_KEY || settings.GROQ_API_KEY || '').trim();
+
       resolve(settings);
     });
   });
@@ -406,20 +421,31 @@ Consignes & Règle d'or de sécurité :
       historyText = history.slice(-8).map(m => `${m.role === 'user' ? 'Utilisateur' : 'DAF IA'}: ${m.content}`).join('\n') + '\n\n';
     }
 
+    const geminiModel = settings.GEMINI_MODEL || "gemini-1.5-flash";
     const genAI = new GoogleGenerativeAI(settings.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: geminiModel });
     const result = await model.generateContent(`${systemPrompt}\n\nHistorique :\n${historyText}Question de l'utilisateur : ${prompt}`);
     const rawResultText = result.response.text();
     return extractProposalFromText(rawResultText);
-  } else if ((settings.DEFAULT_AI === 'openai' && settings.OPENAI_API_KEY) || (settings.DEFAULT_AI === 'deepseek' && settings.DEEPSEEK_API_KEY)) {
+  } else if (settings.OPENAI_API_KEY || settings.DEEPSEEK_API_KEY || settings.GROQ_API_KEY) {
     const isDeepSeek = settings.DEFAULT_AI === 'deepseek';
-    const openai = new OpenAI({ 
-      apiKey: isDeepSeek ? settings.DEEPSEEK_API_KEY : settings.OPENAI_API_KEY,
-      baseURL: isDeepSeek ? 'https://api.deepseek.com' : (settings.OPENAI_BASE_URL && settings.OPENAI_BASE_URL.trim() ? settings.OPENAI_BASE_URL.trim() : undefined)
-    });
-    const selectedModel = isDeepSeek 
-      ? "deepseek-chat" 
-      : (settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim() ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo");
+    const isGroq = settings.DEFAULT_AI === 'groq';
+
+    let apiKey = settings.OPENAI_API_KEY;
+    let baseURL = settings.OPENAI_BASE_URL && settings.OPENAI_BASE_URL.trim() ? settings.OPENAI_BASE_URL.trim() : undefined;
+    let selectedModel = settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim() ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo";
+
+    if (isDeepSeek) {
+      apiKey = settings.DEEPSEEK_API_KEY || apiKey;
+      baseURL = 'https://api.deepseek.com';
+      selectedModel = settings.DEEPSEEK_MODEL || 'deepseek-chat';
+    } else if (isGroq) {
+      apiKey = settings.GROQ_API_KEY || apiKey;
+      baseURL = 'https://api.groq.com/openai/v1';
+      selectedModel = settings.OPENAI_MODEL || 'llama-3.3-70b-versatile';
+    }
+
+    const openai = new OpenAI({ apiKey, baseURL });
 
     const systemPrompt = `Tu es le DAF Principal et Expert-Comptable OHADA / SYSCOHADA de l'entreprise.
 Tu as TOUS LES POUVOIRS d'analyse, d'audit, de pilotage financier, de saisie et de correction sur l'ensemble de la base comptable.
@@ -537,6 +563,10 @@ Instructions :
         tools: isLastIteration ? undefined : tools,
         tool_choice: isLastIteration ? undefined : "auto",
       });
+
+      if (!completion || !completion.choices || !completion.choices[0]) {
+        throw new Error("L'API d'IA n'a retourné aucune réponse valide (Vérifiez la clé API, le quota ou l'URL du service dans les paramètres).");
+      }
 
       const responseMessage = completion.choices[0].message;
       messages.push(responseMessage);
@@ -733,26 +763,37 @@ Tu DOIS impérativement répondre UNIQUEMENT avec un objet JSON valide ayant la 
   try {
     let resultText = "";
     if (settings.DEFAULT_AI === 'gemini' && settings.GEMINI_API_KEY) {
+      const geminiModel = settings.GEMINI_MODEL || "gemini-1.5-flash";
       const genAI = new GoogleGenerativeAI(settings.GEMINI_API_KEY);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const model = genAI.getGenerativeModel({ model: geminiModel });
       const result = await model.generateContent(`${systemPrompt}\n\n${prompt}`);
       resultText = result.response.text();
-    } else if (settings.DEFAULT_AI === 'openai' && settings.OPENAI_API_KEY) {
-      const openai = new OpenAI({ 
-        apiKey: settings.OPENAI_API_KEY,
-        baseURL: settings.OPENAI_BASE_URL ? settings.OPENAI_BASE_URL.trim() : undefined
-      });
+    } else if (settings.OPENAI_API_KEY || settings.DEEPSEEK_API_KEY || settings.GROQ_API_KEY) {
+      const isDeepSeek = settings.DEFAULT_AI === 'deepseek';
+      const isGroq = settings.DEFAULT_AI === 'groq';
+
+      let apiKey = settings.OPENAI_API_KEY;
+      let baseURL = settings.OPENAI_BASE_URL && settings.OPENAI_BASE_URL.trim() ? settings.OPENAI_BASE_URL.trim() : undefined;
+      let selectedModel = settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim() ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo";
+
+      if (isDeepSeek) {
+        apiKey = settings.DEEPSEEK_API_KEY || apiKey;
+        baseURL = 'https://api.deepseek.com';
+        selectedModel = settings.DEEPSEEK_MODEL || 'deepseek-chat';
+      } else if (isGroq) {
+        apiKey = settings.GROQ_API_KEY || apiKey;
+        baseURL = 'https://api.groq.com/openai/v1';
+        selectedModel = settings.OPENAI_MODEL || 'llama-3.3-70b-versatile';
+      }
+
+      const openai = new OpenAI({ apiKey, baseURL });
       const completion = await openai.chat.completions.create({
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
-        model: (settings.OPENAI_MODEL && settings.OPENAI_MODEL.trim()) ? settings.OPENAI_MODEL.trim() : "gpt-3.5-turbo",
+        model: selectedModel,
       });
-      resultText = completion.choices[0].message.content;
-    } else if (settings.DEFAULT_AI === 'deepseek' && settings.DEEPSEEK_API_KEY) {
-      const deepseek = new OpenAI({ apiKey: settings.DEEPSEEK_API_KEY, baseURL: 'https://api.deepseek.com' });
-      const completion = await deepseek.chat.completions.create({
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
-        model: "deepseek-chat",
-      });
+      if (!completion || !completion.choices || !completion.choices[0]) {
+        throw new Error("L'API LLM n'a pas retourné de réponse valide. Vérifiez votre clé API, modèle ou quota.");
+      }
       resultText = completion.choices[0].message.content;
     } else {
       return { analyse: "IA non configurée.", sql: null };

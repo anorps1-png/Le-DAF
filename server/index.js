@@ -1,13 +1,33 @@
 require('dotenv').config();
+
+// Polyfill DOMMatrix for Node.js 24 + pdf-parse compatibility
+if (typeof global.DOMMatrix === 'undefined') {
+  global.DOMMatrix = class DOMMatrix {
+    constructor(init) {
+      if (Array.isArray(init) && init.length >= 6) {
+        this.a = init[0]; this.b = init[1]; this.c = init[2]; this.d = init[3]; this.e = init[4]; this.f = init[5];
+      } else {
+        this.a = 1; this.b = 0; this.c = 0; this.d = 1; this.e = 0; this.f = 0;
+      }
+    }
+  };
+}
+
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const xlsx = require('xlsx');
-const { PDFParse } = require('pdf-parse');
+let PDFParse;
+try {
+  const pdfParseModule = require('pdf-parse');
+  PDFParse = pdfParseModule.PDFParse || pdfParseModule;
+} catch (e) {
+  console.warn('[Server] pdf-parse loading warning:', e.message);
+}
 const db = require('./db');
 const { askAI, matchTransactionWithMemory, learnFromJournalData, friendlyAiErrorMessage } = require('./ai');
 const { computeEtatsFinanciers } = require('./ohadaRules');
-const { getSyncSettings, getPendingLocalCount, performPush, performPull, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
+const { getSyncSettings, getPendingLocalCount, getSyncProgress, performPush, performPull, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
 
 const path = require('path');
 const fs = require('fs');
@@ -185,15 +205,18 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const { GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL } = req.body;
+  const { GEMINI_API_KEY, GEMINI_MODEL, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL, GROQ_API_KEY } = req.body;
   const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
   
   if (GEMINI_API_KEY !== undefined) stmt.run('GEMINI_API_KEY', GEMINI_API_KEY);
+  if (GEMINI_MODEL !== undefined) stmt.run('GEMINI_MODEL', GEMINI_MODEL);
   if (OPENAI_API_KEY !== undefined) stmt.run('OPENAI_API_KEY', OPENAI_API_KEY);
   if (DEEPSEEK_API_KEY !== undefined) stmt.run('DEEPSEEK_API_KEY', DEEPSEEK_API_KEY);
+  if (DEEPSEEK_MODEL !== undefined) stmt.run('DEEPSEEK_MODEL', DEEPSEEK_MODEL);
   if (DEFAULT_AI !== undefined) stmt.run('DEFAULT_AI', DEFAULT_AI);
   if (OPENAI_BASE_URL !== undefined) stmt.run('OPENAI_BASE_URL', OPENAI_BASE_URL);
   if (OPENAI_MODEL !== undefined) stmt.run('OPENAI_MODEL', OPENAI_MODEL);
+  if (GROQ_API_KEY !== undefined) stmt.run('GROQ_API_KEY', GROQ_API_KEY);
   
   stmt.finalize();
   res.json({ success: true });
@@ -2538,12 +2561,61 @@ app.post('/api/sync/pull', async (req, res) => {
   }
 });
 
-app.post('/api/sync/trigger', async (req, res) => {
+app.get('/api/sync/progress', (req, res) => {
   try {
-    const result = await performSync(true);
-    res.json(result);
+    res.json(getSyncProgress());
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/clear', async (req, res) => {
+  try {
+    await new Promise((resolve, reject) => {
+      db.serialize(() => {
+        db.run("PRAGMA foreign_keys = OFF");
+        
+        // Supprimer toutes les écritures et données locales
+        db.run("DELETE FROM journal");
+        db.run("DELETE FROM tiers");
+        db.run("DELETE FROM statement_lines");
+        db.run("DELETE FROM sync_logs");
+        db.run("DELETE FROM exercices");
+        
+        // Vider la traçabilité des suppressions locales pour NE PAS toucher à Supabase Cloud
+        db.run("DELETE FROM deleted_records");
+        db.run("DELETE FROM settings WHERE key LIKE 'LAST_%'");
+        
+        // Réinitialiser les compteurs d'incrémentation automatique
+        db.run("DELETE FROM sqlite_sequence WHERE name IN ('journal', 'tiers', 'statement_lines', 'sync_logs', 'exercices', 'deleted_records')");
+        
+        db.run("PRAGMA foreign_keys = ON", (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    });
+
+    // Double vérification instantanée : s'assurer qu'aucun enregistrement ne subsiste
+    try {
+      const checkJournal = await db.runSelect("SELECT COUNT(*) as c FROM journal");
+      const checkTiers = await db.runSelect("SELECT COUNT(*) as c FROM tiers");
+      const countJournal = (checkJournal && checkJournal[0]) ? checkJournal[0].c : 0;
+      const countTiers = (checkTiers && checkTiers[0]) ? checkTiers[0].c : 0;
+
+      if (countJournal > 0 || countTiers > 0) {
+        await db.runUpdate("DELETE FROM journal");
+        await db.runUpdate("DELETE FROM tiers");
+        await db.runUpdate("DELETE FROM deleted_records");
+      }
+    } catch (checkErr) {
+      console.warn("Post-clear check warning:", checkErr.message);
+    }
+
+    res.json({ success: true, message: "Base de données locale intégralement réinitialisée en 1 clic (Supabase Cloud préservé intact)." });
+  } catch (err) {
+    console.error("Clear DB Error:", err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

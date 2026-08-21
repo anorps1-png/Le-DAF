@@ -140,7 +140,7 @@ export const ImportModule = () => {
   };
 
   const handleClearDB = async () => {
-    if (!window.confirm("Êtes-vous sûr de vouloir vider intégralement la base de données (Journal et Tiers) ? Cette action est irréversible.")) {
+    if (!window.confirm("Êtes-vous sûr de vouloir vider intégralement votre base de données locale (Journal, Tiers, Écritures) ?\n\nNote : Votre base de données Supabase Cloud sera préservée intacte.")) {
       return;
     }
     setLoading(true);

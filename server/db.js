@@ -345,6 +345,8 @@ db.runSelect = function (sql, params = []) {
   });
 };
 
+const isVercelEnvironment = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+
 db.runUpdate = function (sql, params = []) {
   return new Promise((resolve) => {
     if (sql.trim().toUpperCase().startsWith('SELECT')) {
@@ -352,7 +354,16 @@ db.runUpdate = function (sql, params = []) {
     }
     db.run(sql, params, function (err) {
       if (err) resolve({ changes: 0, lastID: 0 });
-      else resolve({ changes: this ? this.changes : 0, lastID: this ? this.lastID : 0 });
+      else {
+        const result = { changes: this ? this.changes : 0, lastID: this ? this.lastID : 0 };
+        if (isVercelEnvironment) {
+          try {
+            const { performPush } = require('./supabaseSync');
+            performPush().catch(e => console.error('[Vercel] Auto-push error:', e.message));
+          } catch (e) {}
+        }
+        resolve(result);
+      }
     });
   });
 };

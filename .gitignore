@@ -10,6 +10,8 @@ MDP Db supabase: 0BCgiZLuwSL5NZpg
 
 node_modules
 dist
+dist-electron
+backups
 dist-ssr
 *.local
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download, ArrowUpCircle, Laptop, ShieldCheck } from 'lucide-react';
 import { getSupabaseConfig, saveSupabaseConfig } from '../utils/supabaseClient';
+import SyncProgressModal from '../components/SyncProgressModal';
 
 export const SettingsModule = () => {
   const [keys, setKeys] = useState({ 
@@ -164,9 +165,13 @@ export const SettingsModule = () => {
   const [isPushing, setIsPushing] = useState(false);
   const [isPulling, setIsPulling] = useState(false);
   const [lastActionResult, setLastActionResult] = useState(null);
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncModalType, setSyncModalType] = useState('push');
 
   const handlePush = async () => {
     setIsPushing(true);
+    setSyncModalType('push');
+    setShowSyncModal(true);
     setLastActionResult(null);
     try {
       const res = await fetch('/api/sync/push', { method: 'POST' });
@@ -183,6 +188,8 @@ export const SettingsModule = () => {
 
   const handlePull = async (force = false) => {
     setIsPulling(true);
+    setSyncModalType('pull');
+    setShowSyncModal(true);
     setLastActionResult(null);
     try {
       const res = await fetch('/api/sync/pull', {
@@ -513,15 +520,17 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
           </div>
 
           <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Modèle d'IA par défaut</label>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Modèle & Cerveau d'IA par défaut</label>
             <select 
               className="input" 
               value={keys.DEFAULT_AI}
               onChange={e => setKeys({...keys, DEFAULT_AI: e.target.value})}
             >
-              <option value="gemini">Google Gemini 1.5 Flash (Recommandé)</option>
-              <option value="openai">OpenAI GPT-3.5/GPT-4</option>
+              <option value="gemini">Google Gemini (Recommandé)</option>
+              <option value="openai">OpenAI (GPT-4o, GPT-3.5, Custom Model)</option>
               <option value="deepseek">DeepSeek (Recommandé pour la comptabilité)</option>
+              <option value="groq">Groq (Llama-3.3 70B ultra rapide)</option>
+              <option value="openrouter">OpenRouter / Serveur LLM Personnalisé</option>
             </select>
           </div>
 
@@ -612,6 +621,12 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
         </div>
       </div>
 
+      {/* MODAL DE PROGRESSION SYNCHRONISATION TEMPS RÉEL */}
+      <SyncProgressModal
+        isOpen={showSyncModal}
+        type={syncModalType}
+        onClose={() => setShowSyncModal(false)}
+      />
     </div>
   );
 };
