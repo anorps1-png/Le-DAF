@@ -209,6 +209,32 @@ try {
           INSERT INTO deleted_records (table_name, record_id) VALUES ('chart_of_accounts', OLD.compte);
         END;`);
 
+        // Triggers automatiques de marquage des modifications pour PUSH Supabase
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_journal_update AFTER UPDATE OF code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, statut_lettrage, code_lettrage, date_lettrage, auteur_lettrage, date_echeance, date_reglement, mode_paiement, reference_banque, statut_validation, validateur, date_validation, motif_rejet, centre_de_cout, tva_taux, tva_montant, piece_jointe ON journal
+        BEGIN
+          UPDATE journal SET updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE id = NEW.id;
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_tiers_update AFTER UPDATE OF type, nom, compte_comptable, solde, statut ON tiers
+        BEGIN
+          UPDATE tiers SET updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE id = NEW.id;
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_rules_update AFTER UPDATE OF pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active ON business_rules
+        BEGIN
+          UPDATE business_rules SET updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE id = NEW.id;
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_exercices_update AFTER UPDATE OF libelle, date_debut, date_fin ON exercices
+        BEGIN
+          UPDATE exercices SET updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE id = NEW.id;
+        END;`);
+
+        db.run(`CREATE TRIGGER IF NOT EXISTS trg_chart_update AFTER UPDATE OF libelle ON chart_of_accounts
+        BEGIN
+          UPDATE chart_of_accounts SET updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE compte = NEW.compte;
+        END;`);
+
         // Migration dynamique des colonnes de suivi avancé
         db.all(`PRAGMA table_info(journal)`, (err, columns) => {
           if (!err && Array.isArray(columns)) {

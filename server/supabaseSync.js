@@ -20,7 +20,7 @@ async function getSyncSettings() {
     
     const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || DEFAULT_URL).trim();
     const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || DEFAULT_KEY).trim();
-    const autoSync = false; // Synchro automatique désactivée par défaut
+    const autoSync = false; // Mode 100% Manuel : synchronisation en arrière-plan désactivée
 
     return { url, key, autoSync };
   } catch (err) {
@@ -650,9 +650,9 @@ async function performSync(force = false, isFullSync = false) {
   };
 }
 
-// Fonction neutre pour l'auto-sync (désactivée à la demande de l'utilisateur)
+// Synchronisation automatique désactivée : Mode 100% Manuel (PUSH & PULL manuels à la demande)
 function startAutoSyncCron() {
-  console.log("Synchronisation automatique désactivée. Utiliser les boutons PUSH et PULL.");
+  console.log("Mode 100% Manuel : synchronisation en arrière-plan désactivée (PUSH et PULL manuels uniquement).");
 }
 
 async function ensureDatabaseHydrated(maxAgeMs = 300000) {
