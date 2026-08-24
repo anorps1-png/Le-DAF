@@ -24,6 +24,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
     "lucide-react": "^1.23.0",
     "multer": "^2.2.0",
     "openai": "^6.45.0",
@@ -61,6 +62,7 @@
       "!server/node_modules/**/*",
       "!server/*.log",
       "!server/test_*.js",
+      "!server/scripts/**/*",
       "!server/*.pdf",
       "!server/*.xlsx"
     ],

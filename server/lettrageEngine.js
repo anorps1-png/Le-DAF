@@ -1,4 +1,12 @@
 const db = require('./db');
+const crypto = require('crypto');
+
+// Suffixe court garanti unique (fragment d'UUID) plutôt qu'un compteur MAX(id)+1 : avec des id
+// UUID, MAX(id) n'a plus de sens, et un compteur resterait de toute façon sujet aux mêmes
+// collisions entre machines hors-ligne que les id eux-mêmes.
+function generateCodeLettrage() {
+  return `L-${new Date().getFullYear()}-${crypto.randomUUID().split('-')[0].toUpperCase()}`;
+}
 
 // --- LETTRAGE AUTOMATIQUE ---
 async function performAutoLettrage() {
@@ -14,10 +22,6 @@ async function performAutoLettrage() {
   if (!lines || lines.length === 0) {
     return { countMatched: 0, message: "Aucune écriture non lettrée disponible sur les comptes de tiers." };
   }
-
-  // Obtenir le dernier numéro de lettrage
-  const lastCodeRow = await db.runGet(`SELECT MAX(id) as max_id FROM journal WHERE code_lettrage IS NOT NULL`);
-  let letterCounter = (lastCodeRow?.max_id || 0) + 1;
 
   let matchedCount = 0;
   const groupsByAccount = {};
@@ -48,7 +52,7 @@ async function performAutoLettrage() {
         d._used = true;
         matchingCredit._used = true;
 
-        const codeLettrage = `L-${new Date().getFullYear()}-${String(letterCounter++).padStart(4, '0')}`;
+        const codeLettrage = generateCodeLettrage();
         const nowStr = new Date().toISOString();
 
         await db.runUpdate(`
@@ -83,9 +87,7 @@ async function performManuelLettrage(lineIds, username = 'Utilisateur') {
   const isSolde = Math.abs(totalDebit - totalCredit) < 0.01;
   const newStatus = isSolde ? 'solde' : 'partiel';
 
-  const lastCodeRow = await db.runGet(`SELECT MAX(id) as max_id FROM journal WHERE code_lettrage IS NOT NULL`);
-  let counter = (lastCodeRow?.max_id || 0) + 1;
-  const codeLettrage = `L-${new Date().getFullYear()}-${String(counter).padStart(4, '0')}`;
+  const codeLettrage = generateCodeLettrage();
   const nowStr = new Date().toISOString();
 
   await db.runUpdate(`

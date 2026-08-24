@@ -9,20 +9,19 @@ let clientInstance = null;
 let currentUrl = '';
 let currentKey = '';
 
-const DEFAULT_URL = 'https://ngswrbghcgmrzwehorfr.supabase.co';
-const DEFAULT_KEY = ['sb_secret', 'OHvP1mcxYgfG8uo1Xuv6VQ_ZpE2hLJF'].join('_');
-
+// Aucune valeur par défaut : chaque déploiement doit fournir son propre projet Supabase
+// via VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (clé "anon", jamais une clé "sb_secret_...").
 export const getSupabaseConfig = () => {
   const url = (
     localStorage.getItem(STORAGE_KEY_URL) ||
     import.meta.env.VITE_SUPABASE_URL ||
-    DEFAULT_URL
+    ''
   ).trim();
 
   const key = (
     localStorage.getItem(STORAGE_KEY_ANON) ||
     import.meta.env.VITE_SUPABASE_ANON_KEY ||
-    DEFAULT_KEY
+    ''
   ).trim();
 
   const autoSync = localStorage.getItem(STORAGE_KEY_AUTO) !== '0';

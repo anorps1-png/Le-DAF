@@ -58,7 +58,7 @@ async function getFinancialContext() {
         GROUP BY compte_tiers
       `;
       const tiers = await db.runSelect(tiersQuery, exParams);
-      const journal = await db.runSelect(`SELECT * FROM journal ${exFilter} ORDER BY date DESC, id DESC LIMIT 500`, exParams);
+      const journal = await db.runSelect(`SELECT * FROM journal ${exFilter} ORDER BY date DESC, created_at DESC, id DESC LIMIT 500`, exParams);
       resolve({ tiers, journal });
     } catch (err) {
       reject(err);
@@ -457,14 +457,14 @@ Structure complète de la base de données :
 4. Table 'business_rules' : id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active.
 5. Table 'fiscal_echeances' : id, libelle, date_limite, type_impot, statut, montant_estime.
 6. Table 'exercices' : id, libelle, date_debut, date_fin.
-7. Table 'statement_lines' : id, date, libelle, debit, credit, solde, matched_journal_id, statut.
+7. Table 'rapprochement_bancaire' : id, date_operation, libelle, debit, credit, journal_id (référence journal.id une fois rapprochée), statut_matching, date_matching.
 
 ${memoryContext}
 
 Instructions :
-- Règle N°1 : Utilise l'outil 'query_database' pour rechercher l'information dont tu as besoin dans les tables avant de répondre.
+- Règle N°1 : Rédige dès le premier coup des requêtes SQL ciblées et agrégées (SUM, COUNT, GROUP BY, WHERE précis) pour limiter les étapes et économiser les tokens.
 - Règle N°2 : Tu as le pouvoir de proposer TOUTE modification, saisie en partie double, lettrage, rééquilibrage ou correction via l'outil 'propose_update'. L'utilisateur devra obligatoirement l'approuver avant son exécution en base.
-- Règle N°3 : Pour les écritures en partie double (Débit + Crédit), tu peux inclure plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
+- Règle N°3 : Pour les écritures en partie double (Débit + Crédit), inclus plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
 - Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.`;
 
     const tools = [
@@ -535,7 +535,7 @@ Instructions :
     ];
 
     if (history && history.length > 0) {
-      const recentHistory = history.slice(-10);
+      const recentHistory = history.slice(-6);
       recentHistory.forEach(msg => {
         if (msg.role === 'user' || msg.role === 'assistant') {
           messages.push({
@@ -552,7 +552,7 @@ Instructions :
 
     let finalResponse = null;
     let iteration = 0;
-    const maxIterations = 25; // Niveau de réflexion maximale
+    const maxIterations = 6; // Valeur initiale économe en tokens
 
     while (iteration < maxIterations && !finalResponse) {
       iteration++;
@@ -576,13 +576,29 @@ Instructions :
           if (toolCall.function.name === "query_database") {
             try {
               const args = JSON.parse(toolCall.function.arguments);
-              let rows = await db.runSelect(args.sql);
-              
+
+              // 'settings' contient les clés API en clair (Gemini/OpenAI/DeepSeek/Supabase) :
+              // le SQL exécuté ici peut être influencé par du contenu non fiable (documents
+              // importés, libellés du journal repris dans le contexte), donc jamais lisible
+              // via cet outil, même en lecture seule.
+              let rows;
+              if (/\b(settings|sqlite_master|sqlite_sequence)\b/i.test(args.sql)) {
+                rows = [];
+                messages.push({
+                  role: "tool",
+                  tool_call_id: toolCall.id,
+                  name: toolCall.function.name,
+                  content: JSON.stringify({ error: "Accès refusé : cette table n'est pas accessible via query_database." })
+                });
+                continue;
+              }
+              rows = await db.runSelect(args.sql);
+
               let toolResponse;
-              if (rows.length > 100) {
-                const truncated = rows.slice(0, 100);
+              if (rows.length > 25) {
+                const truncated = rows.slice(0, 25);
                 toolResponse = {
-                  warning: `La requête a retourné ${rows.length} lignes. Les 100 premières sont renvoyées.`,
+                  warning: `Résultat tronqué aux 25 premières lignes sur ${rows.length} pour préserver les tokens. Utilisez des agrégations (SUM, COUNT, GROUP BY) ou une clause WHERE plus ciblée si nécessaire.`,
                   data: truncated
                 };
               } else {

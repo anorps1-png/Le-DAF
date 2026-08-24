@@ -15,6 +15,7 @@ if (typeof global.DOMMatrix === 'undefined') {
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const multer = require('multer');
 const xlsx = require('xlsx');
 let PDFParse;
@@ -31,10 +32,39 @@ const { getSyncSettings, getPendingLocalCount, getSyncProgress, performPush, per
 
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
-app.use(cors());
+
+// CORS : autorise l'origine du serveur de dev Vite, plus la propre origine du serveur
+// (même host:port que la requête). Ce deuxième cas est indispensable : les balises
+// <script crossorigin>/<link crossorigin> générées par le build Vite envoient un en-tête
+// Origin même pour un chargement strictement same-origin (Electron, build servi par ce
+// même serveur, Vercel) — sans ça, le navigateur bloque le JS/CSS de l'appli elle-même.
+const allowedOrigins = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+]);
+app.use((req, res, next) => {
+  const host = req.headers.host;
+  const selfOrigins = host ? [`http://${host}`, `https://${host}`] : [];
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin) || selfOrigins.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        return callback(null, true);
+      }
+      callback(null, false);
+    }
+  })(req, res, next);
+});
 app.use(express.json());
+
+// Limite générale anti-abus sur toute l'API, et limite stricte sur les routes sensibles
+// (lecture/écriture de clés API, purge de la base, reconfiguration/déclenchement de la sync,
+// application d'une mise à jour).
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 600, standardHeaders: true, legacyHeaders: false });
+const sensitiveLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+app.use('/api', apiLimiter);
 
 // Middleware d'auto-hydratation EXCLUSIVEMENT pour Vercel (serverless sans stockage permanent)
 const isVercelServer = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
@@ -69,7 +99,18 @@ if (isVercelServer) {
   app.use('/public/exports', express.static(exportsDir));
 }
 
-const upload = multer({ storage: multer.memoryStorage() });
+const ALLOWED_UPLOAD_EXTENSIONS = new Set(['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt']);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 Mo
+  fileFilter(req, file, cb) {
+    const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_UPLOAD_EXTENSIONS.has(ext)) {
+      return cb(new Error(`Type de fichier non autorisé : .${ext}`));
+    }
+    cb(null, true);
+  }
+});
 
 // --- EXERCICES COMPTABLES ---
 // journal.date reste une simple chaîne ISO (YYYY-MM-DD) : filtrer par exercice consiste à
@@ -195,7 +236,7 @@ app.get('/api/exercices/active', async (req, res) => {
 });
 
 // --- SETTINGS ROUTES ---
-app.get('/api/settings', (req, res) => {
+app.get('/api/settings', sensitiveLimiter, (req, res) => {
   db.all("SELECT key, value FROM settings", (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     const settings = {};
@@ -204,7 +245,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', sensitiveLimiter, (req, res) => {
   const { GEMINI_API_KEY, GEMINI_MODEL, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL, GROQ_API_KEY } = req.body;
   const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
   
@@ -505,10 +546,10 @@ app.post('/api/import', upload.single('file'), (req, res) => {
         const journalEntriesForML = [];
 
         // Chaque facture/reçu forme une écriture (piece_id) distincte, pour permettre
-        // à l'audit de vérifier l'équilibre débit=crédit par écriture.
-        const maxPieceRow = await db.runSelect("SELECT COALESCE(MAX(piece_id), 0) as maxId FROM journal");
-        let pieceCounter = (maxPieceRow[0] && maxPieceRow[0].maxId) || 0;
-        const insertLine = (...args) => stmt.run(...args, pieceCounter);
+        // à l'audit de vérifier l'équilibre débit=crédit par écriture. Un UUID par facture
+        // (plutôt qu'un compteur MAX(piece_id)+1) pour rester sans collision entre machines.
+        let pieceId = null;
+        const insertLine = (...args) => stmt.run(...args, pieceId);
 
         for (const row of data) {
           const normRow = {};
@@ -554,7 +595,7 @@ app.post('/api/import', upload.single('file'), (req, res) => {
           }
 
           totalInvoices++;
-          pieceCounter++;
+          pieceId = crypto.randomUUID();
 
           // Déterminer le compte de trésorerie (Banque 521100 / Caisse 571100)
           const isBanque = modePaiement.toLowerCase().includes('banq') || modePaiement.toLowerCase().includes('vire');
@@ -923,7 +964,7 @@ app.get('/api/journal', async (req, res) => {
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-    let sql = `SELECT * FROM journal ${whereStr} ORDER BY date DESC, id DESC`;
+    let sql = `SELECT * FROM journal ${whereStr} ORDER BY date DESC, created_at DESC, id DESC`;
     
     if (req.query.limit) {
       sql += ` LIMIT ?`;
@@ -1018,7 +1059,7 @@ app.get('/api/grand-livre/:compte', async (req, res) => {
         SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
         FROM journal
         WHERE compte = ? ${exFilter}
-        ORDER BY date ASC, id ASC
+        ORDER BY date ASC, created_at ASC, id ASC
       `, [compte, ...exParams]),
     ]);
 
@@ -1153,39 +1194,38 @@ app.post('/api/journal', (req, res) => {
     return res.status(400).json({ error: `Écriture déséquilibrée : Débit ${totalDebit.toLocaleString()} ≠ Crédit ${totalCredit.toLocaleString()} (écart de ${Math.abs(totalDebit - totalCredit).toLocaleString()}).` });
   }
 
-  db.get("SELECT COALESCE(MAX(piece_id), 0) + 1 as next_id FROM journal", (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    const piece_id = row.next_id;
+  // UUID plutôt que MAX(piece_id)+1 : un compteur local resterait sujet aux mêmes collisions
+  // entre machines que les id eux-mêmes lors du sync Supabase.
+  const piece_id = crypto.randomUUID();
 
-    db.serialize(() => {
-      db.run("BEGIN TRANSACTION");
-      const stmt = db.prepare(`
-        INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      allLines.forEach(l => {
-        stmt.run(
-          code_journal,
-          poste_budgetaire || '',
-          date,
-          String(l.compte),
-          String(l.compte_tiers || ''),
-          l.libelle,
-          String(n_facture || ''),
-          String(reference || ''),
-          parseFloat(l.debit) || 0,
-          parseFloat(l.credit) || 0,
-          piece_id
-        );
-      });
-      stmt.finalize();
-      db.run("COMMIT", (commitErr) => {
-        if (commitErr) {
-          console.error(commitErr);
-          return res.status(500).json({ error: commitErr.message });
-        }
-        res.json({ success: true, piece_id });
-      });
+  db.serialize(() => {
+    db.run("BEGIN TRANSACTION");
+    const stmt = db.prepare(`
+      INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    allLines.forEach(l => {
+      stmt.run(
+        code_journal,
+        poste_budgetaire || '',
+        date,
+        String(l.compte),
+        String(l.compte_tiers || ''),
+        l.libelle,
+        String(n_facture || ''),
+        String(reference || ''),
+        parseFloat(l.debit) || 0,
+        parseFloat(l.credit) || 0,
+        piece_id
+      );
+    });
+    stmt.finalize();
+    db.run("COMMIT", (commitErr) => {
+      if (commitErr) {
+        console.error(commitErr);
+        return res.status(500).json({ error: commitErr.message });
+      }
+      res.json({ success: true, piece_id });
     });
   });
 });
@@ -1545,7 +1585,7 @@ app.get('/api/export/etats-financiers', async (req, res) => {
     let rawJournalRows = await db.runSelect(`
       SELECT * FROM journal
       ${clause ? `WHERE ${clause}` : ''}
-      ORDER BY date ASC, id ASC
+      ORDER BY date ASC, created_at ASC, id ASC
     `, params);
 
     // Apply active UI filters if present
@@ -2196,22 +2236,6 @@ app.post('/api/audit/apply', (req, res) => {
   });
 });
 
-app.delete('/api/clear', (req, res) => {
-  db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
-    db.run("DELETE FROM journal");
-    db.run("DELETE FROM tiers");
-    db.run("COMMIT", (err) => {
-      if (err) {
-        console.error("CLEAR DB ERROR:", err);
-        res.status(500).json({ error: 'Erreur lors du nettoyage de la base.' });
-      } else {
-        res.json({ success: true, message: 'Base de données vidée avec succès.' });
-      }
-    });
-  });
-});
-
 // --- MEMORY & BUSINESS RULES ROUTES ---
 
 // 1. Get memory docs
@@ -2542,7 +2566,7 @@ app.get('/api/sync/status', async (req, res) => {
   }
 });
 
-app.post('/api/sync/push', async (req, res) => {
+app.post('/api/sync/push', sensitiveLimiter, async (req, res) => {
   try {
     const result = await performPush();
     res.json(result);
@@ -2551,7 +2575,7 @@ app.post('/api/sync/push', async (req, res) => {
   }
 });
 
-app.post('/api/sync/pull', async (req, res) => {
+app.post('/api/sync/pull', sensitiveLimiter, async (req, res) => {
   try {
     const force = req.body && req.body.force === true;
     const result = await performPull(force);
@@ -2569,7 +2593,7 @@ app.get('/api/sync/progress', (req, res) => {
   }
 });
 
-app.delete('/api/clear', async (req, res) => {
+app.delete('/api/clear', sensitiveLimiter, async (req, res) => {
   try {
     await new Promise((resolve, reject) => {
       db.serialize(() => {
@@ -2620,8 +2644,26 @@ app.delete('/api/clear', async (req, res) => {
 });
 
 // --- GESTIONNAIRE DE MISES À JOUR AUTOMATIQUES (MULTI-POSTES) ---
-const CURRENT_VERSION = "2.0.1";
+const CURRENT_VERSION = require('../package.json').version;
 const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/anorps1-png/Le-DAF/main/version.json";
+
+// Domaines autorisés pour le téléchargement d'un installeur de mise à jour : uniquement les
+// releases GitHub du dépôt officiel (et le CDN objects.githubusercontent.com vers lequel
+// GitHub redirige les téléchargements de release), en HTTPS exclusivement.
+const ALLOWED_UPDATE_HOSTS = new Set([
+  'github.com',
+  'objects.githubusercontent.com'
+]);
+function isAllowedUpdateUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.protocol === 'https:' &&
+      ALLOWED_UPDATE_HOSTS.has(parsed.hostname) &&
+      (parsed.hostname !== 'github.com' || parsed.pathname.startsWith('/anorps1-png/Le-DAF/releases/'));
+  } catch {
+    return false;
+  }
+}
 
 function compareSemVer(v1, v2) {
   const parse = v => (v || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -2673,15 +2715,17 @@ app.get('/api/system/check-update', async (req, res) => {
   }
 });
 
-app.post('/api/system/apply-update', async (req, res) => {
+app.post('/api/system/apply-update', sensitiveLimiter, async (req, res) => {
   try {
     const { downloadUrl } = req.body;
     if (!downloadUrl) {
       return res.status(400).json({ error: 'URL de téléchargement requise.' });
     }
+    if (!isAllowedUpdateUrl(downloadUrl)) {
+      return res.status(403).json({ error: 'URL de mise à jour non autorisée.' });
+    }
 
     const https = require('https');
-    const http = require('http');
     const { spawn } = require('child_process');
     const os = require('os');
 
@@ -2689,8 +2733,10 @@ app.post('/api/system/apply-update', async (req, res) => {
     const fileStream = fs.createWriteStream(tempSetupPath);
 
     const download = (url, cb) => {
-      const proto = url.startsWith('https') ? https : http;
-      proto.get(url, (response) => {
+      if (!isAllowedUpdateUrl(url)) {
+        return cb(new Error('Redirection vers une URL non autorisée.'));
+      }
+      https.get(url, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           return download(response.headers.location, cb);
         }
@@ -2730,7 +2776,7 @@ app.post('/api/system/apply-update', async (req, res) => {
   }
 });
 
-app.post('/api/sync/config', async (req, res) => {
+app.post('/api/sync/config', sensitiveLimiter, async (req, res) => {
   try {
     const { url, key, autoSync } = req.body;
     
@@ -2823,7 +2869,7 @@ app.get('/api/lettrage/non-lettres', async (req, res) => {
       query += ` AND (compte = ? OR compte_tiers = ?)`;
       params.push(account, account);
     }
-    query += ` ORDER BY date DESC, id DESC`;
+    query += ` ORDER BY date DESC, created_at DESC, id DESC`;
     const rows = await db.runSelect(query, params);
     res.json(rows || []);
   } catch (err) {
@@ -2957,10 +3003,21 @@ app.use((req, res) => {
   res.status(404).send('Not found');
 });
 
+// Gestionnaire d'erreurs centralisé : ne renvoie jamais la stack/le message brut en production
+// (évite de fuiter des fragments SQL/chemins internes), capte aussi les erreurs multer (fileFilter/limits).
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  const isDev = process.env.NODE_ENV !== 'production';
+  res.status(err.status || 400).json({
+    error: isDev ? err.message : 'Une erreur est survenue lors du traitement de la requête.'
+  });
+});
+
 if (!process.env.VERCEL && !process.env.NOW_BUILDER && !process.env.VERCEL_ENV) {
   const PORT = process.env.PORT || 3003;
-  app.listen(PORT, () => {
-    console.log(`Backend server running on http://localhost:${PORT}`);
+  const HOST = process.env.HOST || '127.0.0.1';
+  app.listen(PORT, HOST, () => {
+    console.log(`Backend server running on http://${HOST}:${PORT}`);
     startAutoSyncCron();
   });
 }

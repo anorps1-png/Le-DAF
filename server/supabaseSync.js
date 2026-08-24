@@ -60,28 +60,27 @@ function finishProgress(status, message, details = {}) {
   };
 }
 
-const DEFAULT_URL = 'https://ngswrbghcgmrzwehorfr.supabase.co';
-const DEFAULT_KEY = ['sb_secret', 'OHvP1mcxYgfG8uo1Xuv6VQ_ZpE2hLJF'].join('_');
-
 const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
 
-// Lit la configuration Supabase depuis la table settings de SQLite ou variables d'environnement
+// Lit la configuration Supabase depuis la table settings de SQLite ou variables d'environnement.
+// Aucune valeur par défaut : chaque déploiement doit configurer son propre projet Supabase
+// (clé "anon", jamais une clé "sb_secret_...").
 async function getSyncSettings() {
   try {
     const rows = await db.runSelect("SELECT key, value FROM settings WHERE key LIKE 'SUPABASE_%'");
     const settings = {};
     (rows || []).forEach(r => { settings[r.key] = r.value; });
-    
-    const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || DEFAULT_URL).trim();
-    const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || DEFAULT_KEY).trim();
+
+    const url = (settings.SUPABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+    const key = (settings.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
     const autoSync = false; // Mode 100% Manuel : synchronisation en arrière-plan désactivée
 
     return { url, key, autoSync };
   } catch (err) {
     console.error('Error fetching Supabase settings:', err);
     return {
-      url: DEFAULT_URL,
-      key: DEFAULT_KEY,
+      url: '',
+      key: '',
       autoSync: false
     };
   }
@@ -160,7 +159,7 @@ async function performPush() {
     let unsyncedRules = [];
 
     try { pendingDeletes = (await db.runSelect("SELECT id, table_name, record_id FROM deleted_records WHERE synced_at IS NULL")) || []; } catch (e) {}
-    try { unsyncedJournal = (await db.runSelect("SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id FROM journal WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
+    try { unsyncedJournal = (await db.runSelect("SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, created_at FROM journal WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
     try { unsyncedTiers = (await db.runSelect("SELECT id, type, nom, compte_comptable, solde, statut FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
     try { unsyncedExercices = (await db.runSelect("SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
     try { unsyncedAccounts = (await db.runSelect("SELECT compte, libelle, source_doc_id FROM chart_of_accounts WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
@@ -189,7 +188,10 @@ async function performPush() {
         const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
         const chunks = chunkArray(list, 500);
         for (const chunk of chunks) {
-          const idsToDelete = chunk.map(item => tbl === 'chart_of_accounts' ? String(item.record_id) : Number(item.record_id));
+          // record_id est toujours du texte (UUID pour journal/tiers/exercices/business_rules,
+          // code compte pour chart_of_accounts) : plus d'id numérique à convertir depuis la
+          // migration UUID.
+          const idsToDelete = chunk.map(item => String(item.record_id));
           const { error } = await client.from(tbl).delete().in(idCol, idsToDelete);
 
           const deletedPayload = chunk.map(item => ({
@@ -235,6 +237,7 @@ async function performPush() {
           debit: Number(r.debit) || 0,
           credit: Number(r.credit) || 0,
           piece_id: r.piece_id || null,
+          created_at: r.created_at || new Date().toISOString(),
           updated_at: new Date().toISOString()
         }));
 
@@ -458,8 +461,8 @@ async function performPull(force = false) {
               const stmt = db.prepare(`INSERT OR REPLACE INTO journal (
                 id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id,
                 statut_lettrage, code_lettrage, date_lettrage, auteur_lettrage, date_echeance, date_reglement, mode_paiement, reference_banque,
-                statut_validation, validateur, date_validation, motif_rejet, centre_de_cout, tva_taux, tva_montant, piece_jointe, synced_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`);
+                statut_validation, validateur, date_validation, motif_rejet, centre_de_cout, tva_taux, tva_montant, piece_jointe, created_at, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`);
 
               for (const r of remoteJournal) {
                 if (!r.id && !r.compte && !r.libelle) continue;
@@ -491,7 +494,8 @@ async function performPull(force = false) {
                   r.centre_de_cout || null,
                   Number(r.tva_taux) || 0,
                   Number(r.tva_montant) || 0,
-                  r.piece_jointe || null
+                  r.piece_jointe || null,
+                  r.created_at || null
                 ]);
                 journalPulled++;
                 pulledCount++;

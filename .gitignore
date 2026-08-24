@@ -6,7 +6,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-MDP Db supabase: 0BCgiZLuwSL5NZpg
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
 
 node_modules
 dist
