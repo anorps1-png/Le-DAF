@@ -132,6 +132,27 @@ function chunkArray(array, size) {
   return chunks;
 }
 
+// Ré-essaie un appel réseau Supabase avec backoff exponentiel : une coupure Internet passagère en
+// plein milieu d'un PUSH/PULL déclenché manuellement ne doit pas obliger l'utilisateur à relancer
+// l'opération à la main dès que la connexion revient. Ne couvre que les erreurs réseau (fetch qui
+// lève une exception, ex: DNS/connexion impossible) : les erreurs métier retournées par Supabase
+// dans `{ data, error }` restent gérées telle quelles par l'appelant.
+async function withNetworkRetry(fn, { retries = 5, baseDelayMs = 2000, maxDelayMs = 20000 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) break;
+      const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt));
+      updateProgress(`Connexion interrompue, nouvelle tentative dans ${Math.round(delay / 1000)}s... (${attempt + 1}/${retries})`, syncProgress.current, syncProgress.total);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 // =========================================================================
 // OPERATEUR PUSH : Envoie les modifications locales vers Supabase
 // =========================================================================
@@ -192,7 +213,7 @@ async function performPush() {
           // code compte pour chart_of_accounts) : plus d'id numérique à convertir depuis la
           // migration UUID.
           const idsToDelete = chunk.map(item => String(item.record_id));
-          const { error } = await client.from(tbl).delete().in(idCol, idsToDelete);
+          const { error } = await withNetworkRetry(() => client.from(tbl).delete().in(idCol, idsToDelete));
 
           const deletedPayload = chunk.map(item => ({
             table_name: item.table_name,
@@ -200,7 +221,7 @@ async function performPush() {
             deleted_at: new Date().toISOString()
           }));
           try {
-            await client.from('deleted_records').upsert(deletedPayload);
+            await withNetworkRetry(() => client.from('deleted_records').upsert(deletedPayload));
           } catch (delLogErr) {
             console.warn("Deleted records remote log warning:", delLogErr.message);
           }
@@ -241,7 +262,7 @@ async function performPush() {
           updated_at: new Date().toISOString()
         }));
 
-        const { error } = await client.from('journal').upsert(payload, { onConflict: 'id' });
+        const { error } = await withNetworkRetry(() => client.from('journal').upsert(payload, { onConflict: 'id' }));
         if (!error) {
           const ids = chunk.map(r => r.id);
           const placeholders = ids.map(() => '?').join(',');
@@ -272,7 +293,7 @@ async function performPush() {
           updated_at: new Date().toISOString()
         }));
 
-        const { error } = await client.from('tiers').upsert(payload, { onConflict: 'nom' });
+        const { error } = await withNetworkRetry(() => client.from('tiers').upsert(payload, { onConflict: 'nom' }));
         if (!error) {
           const ids = chunk.map(r => r.id);
           const placeholders = ids.map(() => '?').join(',');
@@ -298,7 +319,7 @@ async function performPush() {
         updated_at: new Date().toISOString()
       }));
 
-      const { error } = await client.from('exercices').upsert(payload, { onConflict: 'id' });
+      const { error } = await withNetworkRetry(() => client.from('exercices').upsert(payload, { onConflict: 'id' }));
       if (!error) {
         const ids = unsyncedExercices.map(r => r.id);
         const placeholders = ids.map(() => '?').join(',');
@@ -318,7 +339,7 @@ async function performPush() {
         source_doc_id: r.source_doc_id || null,
         updated_at: new Date().toISOString()
       }));
-      const { error } = await client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' });
+      const { error } = await withNetworkRetry(() => client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' }));
       if (!error) {
         const ids = unsyncedAccounts.map(r => r.compte);
         const placeholders = ids.map(() => '?').join(',');
@@ -345,7 +366,7 @@ async function performPush() {
         is_active: r.is_active !== undefined ? r.is_active : 1,
         updated_at: new Date().toISOString()
       }));
-      const { error } = await client.from('business_rules').upsert(payload, { onConflict: 'id' });
+      const { error } = await withNetworkRetry(() => client.from('business_rules').upsert(payload, { onConflict: 'id' }));
       if (!error) {
         const ids = unsyncedRules.map(r => r.id);
         const placeholders = ids.map(() => '?').join(',');
@@ -402,28 +423,56 @@ async function performPull(force = false) {
 
   try {
     updateProgress('Téléchargement des suppressions distantes...', 5, 100);
-    // 0) PULL DELETES depuis Supabase
+    // 0) PULL DELETES depuis Supabase. Ne rejoue que les suppressions plus récentes que le
+    // dernier pull réussi (comme le Journal via LAST_JOURNAL_PULL_AT) : sans ce filtre, un pull
+    // reconstruit et rejoue l'historique COMPLET des suppressions à chaque fois, y compris
+    // celles déjà appliquées, ce qui est à la fois inutile (table non paginée pouvant dépasser
+    // la limite par défaut de l'API) et risqué si un id est un jour réutilisé.
     try {
-      const { data: remoteDeletes, error: delErr } = await client
-        .from('deleted_records')
-        .select('*');
+      const lastDelPullRows = await db.runSelect("SELECT value FROM settings WHERE key = 'LAST_DELETES_PULL_AT'");
+      const lastDelPullAt = force ? null : ((lastDelPullRows && lastDelPullRows[0]) ? lastDelPullRows[0].value : null);
 
-      if (!delErr && Array.isArray(remoteDeletes) && remoteDeletes.length > 0) {
-        const tableGroups = {};
-        for (const d of remoteDeletes) {
-          if (!d.table_name || !d.record_id) continue;
-          if (!tableGroups[d.table_name]) tableGroups[d.table_name] = [];
-          tableGroups[d.table_name].push(d.record_id);
-        }
+      let fromIdx = 0;
+      const pageSize = 1000;
+      let hasMore = true;
+      let latestDeletedAt = null;
 
-        for (const [tbl, ids] of Object.entries(tableGroups)) {
-          const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
-          const chunks = chunkArray(ids, 500);
-          for (const chunk of chunks) {
-            const placeholders = chunk.map(() => '?').join(',');
-            await db.runUpdate(`DELETE FROM ${tbl} WHERE ${idCol} IN (${placeholders})`, chunk);
+      while (hasMore) {
+        let query = client.from('deleted_records').select('*').order('deleted_at', { ascending: true });
+        if (lastDelPullAt) query = query.gt('deleted_at', lastDelPullAt);
+
+        const { data: remoteDeletes, error: delErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
+        if (delErr) { hasMore = false; break; }
+
+        if (Array.isArray(remoteDeletes) && remoteDeletes.length > 0) {
+          const tableGroups = {};
+          for (const d of remoteDeletes) {
+            if (!d.table_name || !d.record_id) continue;
+            if (!tableGroups[d.table_name]) tableGroups[d.table_name] = [];
+            tableGroups[d.table_name].push(d.record_id);
+            if (d.deleted_at && (!latestDeletedAt || d.deleted_at > latestDeletedAt)) {
+              latestDeletedAt = d.deleted_at;
+            }
           }
+
+          for (const [tbl, ids] of Object.entries(tableGroups)) {
+            const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
+            const idChunks = chunkArray(ids, 500);
+            for (const chunk of idChunks) {
+              const placeholders = chunk.map(() => '?').join(',');
+              await db.runUpdate(`DELETE FROM ${tbl} WHERE ${idCol} IN (${placeholders})`, chunk);
+            }
+          }
+
+          if (remoteDeletes.length < pageSize) hasMore = false;
+          else fromIdx += pageSize;
+        } else {
+          hasMore = false;
         }
+      }
+
+      if (latestDeletedAt) {
+        await db.runUpdate("INSERT OR REPLACE INTO settings (key, value) VALUES ('LAST_DELETES_PULL_AT', ?)", [latestDeletedAt]);
       }
     } catch (e) {
       console.warn("Error PULL Deletes (table missing or query error):", e.message);
@@ -452,7 +501,7 @@ async function performPull(force = false) {
           query = query.order('id', { ascending: true });
         }
 
-        const { data: remoteJournal, error: jErr } = await query.range(fromIdx, fromIdx + pageSize - 1);
+        const { data: remoteJournal, error: jErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
 
         if (!jErr && Array.isArray(remoteJournal) && remoteJournal.length > 0) {
           await new Promise((resolve, reject) => {
@@ -540,21 +589,29 @@ async function performPull(force = false) {
       let hasMore = true;
       let tiersPulled = 0;
       while (hasMore) {
-        const { data: remoteTiers, error: tErr } = await client
+        const { data: remoteTiers, error: tErr } = await withNetworkRetry(() => client
           .from('tiers')
           .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1);
+          .range(fromIdx, fromIdx + pageSize - 1));
 
         if (!tErr && Array.isArray(remoteTiers) && remoteTiers.length > 0) {
-          for (const t of remoteTiers) {
-            if (!t.nom) continue;
-            await db.runUpdate(
-              "INSERT OR REPLACE INTO tiers (id, nom, type, compte_comptable, solde, statut, synced_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-              [t.id || null, t.nom, t.type || 'Client', t.compte_comptable || '', Number(t.solde) || 0, t.statut || 'Actif']
-            );
-            tiersPulled++;
-            pulledCount++;
+          const validRows = remoteTiers.filter(t => t.nom);
+          if (validRows.length > 0) {
+            await new Promise((resolve, reject) => {
+              db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+                const stmt = db.prepare("INSERT OR REPLACE INTO tiers (id, nom, type, compte_comptable, solde, statut, synced_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                for (const t of validRows) {
+                  stmt.run([t.id || null, t.nom, t.type || 'Client', t.compte_comptable || '', Number(t.solde) || 0, t.statut || 'Actif']);
+                }
+                stmt.finalize();
+                db.run("COMMIT", (err) => err ? reject(err) : resolve());
+              });
+            });
+            tiersPulled += validRows.length;
+            pulledCount += validRows.length;
           }
+          updateProgress(`Téléchargement Tiers (${tiersPulled})...`, Math.min(82, 70 + Math.round((tiersPulled / Math.max(1, tiersPulled + 200)) * 12)), 100);
           if (remoteTiers.length < pageSize) hasMore = false;
           else fromIdx += pageSize;
         } else {
@@ -574,21 +631,29 @@ async function performPull(force = false) {
       let hasMore = true;
       let exPulled = 0;
       while (hasMore) {
-        const { data: remoteExercices, error: exErr } = await client
+        const { data: remoteExercices, error: exErr } = await withNetworkRetry(() => client
           .from('exercices')
           .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1);
+          .range(fromIdx, fromIdx + pageSize - 1));
 
         if (!exErr && Array.isArray(remoteExercices) && remoteExercices.length > 0) {
-          for (const ex of remoteExercices) {
-            if (!ex.libelle) continue;
-            await db.runUpdate(
-              "INSERT OR REPLACE INTO exercices (id, libelle, date_debut, date_fin, synced_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-              [ex.id || null, ex.libelle, ex.date_debut, ex.date_fin]
-            );
-            exPulled++;
-            pulledCount++;
+          const validRows = remoteExercices.filter(ex => ex.libelle);
+          if (validRows.length > 0) {
+            await new Promise((resolve, reject) => {
+              db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+                const stmt = db.prepare("INSERT OR REPLACE INTO exercices (id, libelle, date_debut, date_fin, synced_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                for (const ex of validRows) {
+                  stmt.run([ex.id || null, ex.libelle, ex.date_debut, ex.date_fin]);
+                }
+                stmt.finalize();
+                db.run("COMMIT", (err) => err ? reject(err) : resolve());
+              });
+            });
+            exPulled += validRows.length;
+            pulledCount += validRows.length;
           }
+          updateProgress(`Téléchargement Exercices (${exPulled})...`, Math.min(90, 82 + Math.round((exPulled / Math.max(1, exPulled + 50)) * 8)), 100);
           if (remoteExercices.length < pageSize) hasMore = false;
           else fromIdx += pageSize;
         } else {
@@ -608,21 +673,29 @@ async function performPull(force = false) {
       let hasMore = true;
       let acPulled = 0;
       while (hasMore) {
-        const { data: remoteAccounts, error: acErr } = await client
+        const { data: remoteAccounts, error: acErr } = await withNetworkRetry(() => client
           .from('chart_of_accounts')
           .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1);
+          .range(fromIdx, fromIdx + pageSize - 1));
 
         if (!acErr && Array.isArray(remoteAccounts) && remoteAccounts.length > 0) {
-          for (const a of remoteAccounts) {
-            if (!a.compte) continue;
-            await db.runUpdate(
-              "INSERT OR REPLACE INTO chart_of_accounts (compte, libelle, source_doc_id, synced_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-              [a.compte, a.libelle, a.source_doc_id || null]
-            );
-            acPulled++;
-            pulledCount++;
+          const validRows = remoteAccounts.filter(a => a.compte);
+          if (validRows.length > 0) {
+            await new Promise((resolve, reject) => {
+              db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+                const stmt = db.prepare("INSERT OR REPLACE INTO chart_of_accounts (compte, libelle, source_doc_id, synced_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)");
+                for (const a of validRows) {
+                  stmt.run([a.compte, a.libelle, a.source_doc_id || null]);
+                }
+                stmt.finalize();
+                db.run("COMMIT", (err) => err ? reject(err) : resolve());
+              });
+            });
+            acPulled += validRows.length;
+            pulledCount += validRows.length;
           }
+          updateProgress(`Téléchargement Plan Comptable (${acPulled})...`, Math.min(96, 90 + Math.round((acPulled / Math.max(1, acPulled + 500)) * 6)), 100);
           if (remoteAccounts.length < pageSize) hasMore = false;
           else fromIdx += pageSize;
         } else {
@@ -642,21 +715,29 @@ async function performPull(force = false) {
       let hasMore = true;
       let brPulled = 0;
       while (hasMore) {
-        const { data: remoteRules, error: brErr } = await client
+        const { data: remoteRules, error: brErr } = await withNetworkRetry(() => client
           .from('business_rules')
           .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1);
+          .range(fromIdx, fromIdx + pageSize - 1));
 
         if (!brErr && Array.isArray(remoteRules) && remoteRules.length > 0) {
-          for (const b of remoteRules) {
-            if (!b.pattern) continue;
-            await db.runUpdate(
-              "INSERT OR REPLACE INTO business_rules (id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-              [b.id || null, b.pattern, b.condition_type || 'contains', b.target_account, b.target_journal, Number(b.vat_rate) || 0, Number(b.confidence_score) || 1.0, b.auto_learned || 0, b.description || '', b.is_active !== undefined ? b.is_active : 1]
-            );
-            brPulled++;
-            pulledCount++;
+          const validRows = remoteRules.filter(b => b.pattern);
+          if (validRows.length > 0) {
+            await new Promise((resolve, reject) => {
+              db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+                const stmt = db.prepare("INSERT OR REPLACE INTO business_rules (id, pattern, condition_type, target_account, target_journal, vat_rate, confidence_score, auto_learned, description, is_active, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                for (const b of validRows) {
+                  stmt.run([b.id || null, b.pattern, b.condition_type || 'contains', b.target_account, b.target_journal, Number(b.vat_rate) || 0, Number(b.confidence_score) || 1.0, b.auto_learned || 0, b.description || '', b.is_active !== undefined ? b.is_active : 1]);
+                }
+                stmt.finalize();
+                db.run("COMMIT", (err) => err ? reject(err) : resolve());
+              });
+            });
+            brPulled += validRows.length;
+            pulledCount += validRows.length;
           }
+          updateProgress(`Téléchargement Règles Métier & IA (${brPulled})...`, Math.min(100, 96 + Math.round((brPulled / Math.max(1, brPulled + 500)) * 4)), 100);
           if (remoteRules.length < pageSize) hasMore = false;
           else fromIdx += pageSize;
         } else {

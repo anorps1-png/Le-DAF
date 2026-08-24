@@ -16,6 +16,7 @@ DROP TABLE IF EXISTS public.tiers;
 DROP TABLE IF EXISTS public.exercices;
 DROP TABLE IF EXISTS public.chart_of_accounts;
 DROP TABLE IF EXISTS public.business_rules;
+DROP TABLE IF EXISTS public.deleted_records;
 
 -- 1. Table Journal (Écritures Comptables OHADA)
 CREATE TABLE public.journal (
@@ -96,6 +97,18 @@ CREATE TABLE public.business_rules (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 6. Table de traçabilité des suppressions (permet à un PULL sur une autre machine de répercuter
+-- une suppression faite ici, et inversement) : sans elle, toute suppression locale reste "orpheline"
+-- et un PULL ultérieur restaure les lignes supposément supprimées à partir de la copie encore
+-- intacte sur Supabase.
+CREATE TABLE public.deleted_records (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  table_name TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX idx_deleted_records_deleted_at ON public.deleted_records(deleted_at);
+
 -- ATTENTION : ce script ouvre l'accès complet (RLS désactivée + GRANT ALL à anon) à VOTRE
 -- projet Supabase personnel. Ceci n'est sûr QUE si :
 --   1. Ce projet Supabase est privé, dédié uniquement à votre propre synchronisation (pas
@@ -111,6 +124,7 @@ ALTER TABLE public.tiers DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exercices DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chart_of_accounts DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.business_rules DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.deleted_records DISABLE ROW LEVEL SECURITY;
 
 -- Accorder tous les droits au rôle public anon
 GRANT ALL ON ALL TABLES IN SCHEMA public TO anon;

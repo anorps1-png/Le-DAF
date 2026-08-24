@@ -68,7 +68,7 @@ async function getFinancialContext() {
 
 async function getBusinessMemoryContext() {
   return new Promise((resolve) => {
-    db.all("SELECT * FROM business_rules WHERE is_active = 1 ORDER BY confidence_score DESC", (err, rules) => {
+    db.all("SELECT * FROM business_rules WHERE is_active = 1 ORDER BY confidence_score DESC, occurrences DESC LIMIT 300", (err, rules) => {
       if (err) rules = [];
       db.all("SELECT title, category, content FROM knowledge_docs ORDER BY id DESC", (err, docs) => {
         if (err) docs = [];
@@ -283,7 +283,7 @@ async function matchTransactionWithMemory(libelle, compteTiers = '', isAchat = t
   });
 }
 
-async function learnFromJournalData(entries) {
+async function learnFromJournalData(entries, minOccurrencesForNewRule = 1) {
   if (!Array.isArray(entries) || entries.length === 0) return 0;
   
   const stopWords = new Set(['fact', 'facture', 'n°', 'no', 'du', 'au', 'de', 'la', 'le', 'les', 'des', 'pour', 'par', 'virement', 'cheque', 'reglement', 'paiment', 'achat', 'vente', 'duplicata']);
@@ -317,42 +317,76 @@ async function learnFromJournalData(entries) {
     });
   });
 
-  let learnedCount = 0;
+  // Résout chaque motif (classification SYSCOHADA sur 601100 comprise) avant toute requête SQL :
+  // sur un gros import (des dizaines/centaines de milliers de motifs uniques), interroger et
+  // écrire un par un est le vrai goulot d'étranglement (chaque round-trip + transaction implicite
+  // a un coût fixe non négligeable). On regroupe donc la vérification d'existence en quelques
+  // requêtes IN(...), puis toutes les écritures dans UNE seule transaction.
+  const resolved = [];
   for (const key in patternCounts) {
     const count = patternCounts[key];
-    if (count >= 1) {
-      let [pattern, compte, codeJournal] = key.split('|||');
+    let [pattern, compte, codeJournal] = key.split('|||');
 
-      // Si le compte transmis est le compte générique 601100, affiner avec la classification SYSCOHADA par nature
-      if (compte === '601100') {
-        const sysClassif = determineSyscohadaAccount(pattern, '', true);
-        if (sysClassif.target_account !== '601100') {
-          compte = sysClassif.target_account;
-          if (sysClassif.target_journal) codeJournal = sysClassif.target_journal;
-        }
+    if (compte === '601100') {
+      const sysClassif = determineSyscohadaAccount(pattern, '', true);
+      if (sysClassif.target_account !== '601100') {
+        compte = sysClassif.target_account;
+        if (sysClassif.target_journal) codeJournal = sysClassif.target_journal;
       }
-
-      const confidence = Math.min(0.98, 0.70 + (count * 0.05));
-
-      await new Promise((res) => {
-        db.get("SELECT id, occurrences, confidence_score FROM business_rules WHERE pattern = ?", [pattern], (err, existing) => {
-          if (!err && existing) {
-            const newOcc = existing.occurrences + count;
-            const newConf = Math.min(0.98, Math.max(existing.confidence_score, 0.75 + (newOcc * 0.04)));
-            db.run("UPDATE business_rules SET occurrences = ?, confidence_score = ?, target_account = ?, target_journal = COALESCE(?, target_journal) WHERE id = ?", [newOcc, newConf, compte, codeJournal || null, existing.id], () => res());
-          } else {
-            db.run(
-              "INSERT INTO business_rules (pattern, condition_type, target_account, target_journal, confidence_score, auto_learned, occurrences, description) VALUES (?, 'contains', ?, ?, ?, 1, ?, ?)",
-              [pattern, compte, codeJournal || null, confidence, count, `Appris automatiquement depuis journal Excel (${count} écriture(s))`],
-              () => {
-                learnedCount++;
-                res();
-              }
-            );
-          }
-        });
-      });
     }
+
+    resolved.push({ pattern, compte, codeJournal, count, confidence: Math.min(0.98, 0.70 + (count * 0.05)) });
+  }
+
+  const existingByPattern = new Map();
+  const distinctPatterns = [...new Set(resolved.map(r => r.pattern))];
+  const LOOKUP_CHUNK = 500;
+  for (let i = 0; i < distinctPatterns.length; i += LOOKUP_CHUNK) {
+    const chunk = distinctPatterns.slice(i, i + LOOKUP_CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = await new Promise((res) => {
+      db.all(`SELECT id, pattern, occurrences, confidence_score FROM business_rules WHERE pattern IN (${placeholders})`, chunk, (err, rows) => res(err ? [] : rows));
+    });
+    // Comme dans l'implémentation d'origine, l'appariement se fait sur le pattern seul (pas
+    // compte+journal) : conserver ce comportement exact pour ne pas changer la logique métier.
+    rows.forEach(r => { if (!existingByPattern.has(r.pattern)) existingByPattern.set(r.pattern, r); });
+  }
+
+  let learnedCount = 0;
+  const toUpdate = [];
+  const toInsert = [];
+  for (const r of resolved) {
+    const existing = existingByPattern.get(r.pattern);
+    if (existing) {
+      const newOcc = existing.occurrences + r.count;
+      const newConf = Math.min(0.98, Math.max(existing.confidence_score, 0.75 + (newOcc * 0.04)));
+      toUpdate.push([newOcc, newConf, r.compte, r.codeJournal || null, existing.id]);
+    } else if (r.count >= minOccurrencesForNewRule) {
+      // En dessous du seuil, un mot inédit n'est pas encore assez fiable pour devenir une règle
+      // permanente (cf. l'explosion à 13k+ règles à occurrence unique observée sur des imports en
+      // masse non supervisés) : on attend qu'il se répète avant de le mémoriser.
+      toInsert.push([r.pattern, r.compte, r.codeJournal || null, r.confidence, r.count, `Appris automatiquement depuis journal Excel (${r.count} écriture(s))`]);
+      learnedCount++;
+    }
+  }
+
+  if (toUpdate.length > 0 || toInsert.length > 0) {
+    await new Promise((resolve, reject) => {
+      db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        if (toUpdate.length > 0) {
+          const updStmt = db.prepare("UPDATE business_rules SET occurrences = ?, confidence_score = ?, target_account = ?, target_journal = COALESCE(?, target_journal) WHERE id = ?");
+          toUpdate.forEach(params => updStmt.run(params));
+          updStmt.finalize();
+        }
+        if (toInsert.length > 0) {
+          const insStmt = db.prepare("INSERT INTO business_rules (pattern, condition_type, target_account, target_journal, confidence_score, auto_learned, occurrences, description) VALUES (?, 'contains', ?, ?, ?, 1, ?, ?)");
+          toInsert.forEach(params => insStmt.run(params));
+          insStmt.finalize();
+        }
+        db.run("COMMIT", (err) => err ? reject(err) : resolve());
+      });
+    });
   }
 
   return learnedCount;

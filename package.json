@@ -15,8 +15,8 @@
     "server": "node server/index.js",
     "electron": "electron .",
     "electron:dev": "vite build && electron .",
-    "build:electron": "vite build && npx -y electron-builder --win",
-    "dist:exe": "vite build && npx -y electron-builder --win"
+    "build:electron": "vite build && node build-installer.cjs",
+    "dist:exe": "vite build && node build-installer.cjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -66,15 +66,13 @@
       "!server/*.pdf",
       "!server/*.xlsx"
     ],
-    "asar": false,
+    "asar": true,
     "asarUnpack": [
       "**/node_modules/sqlite3/**/*"
     ],
     "win": {
       "target": [
-        "nsis",
-        "dir",
-        "zip"
+        "dir"
       ]
     },
     "nsis": {

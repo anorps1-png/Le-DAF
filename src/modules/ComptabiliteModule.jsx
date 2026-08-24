@@ -35,9 +35,21 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [journalCodes, setJournalCodes] = useState(['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR']);
   const [customAccounts, setCustomAccounts] = useState({});
   const [journalSearch, setJournalSearch] = useState('');
+  const [journalSearchDebounced, setJournalSearchDebounced] = useState('');
   const [journalPage, setJournalPage] = useState(1);
   const [journalPageSize, setJournalPageSize] = useState(50);
   const [showAllDates, setShowAllDates] = useState(false);
+  // Le Journal est paginé côté serveur (un import volumineux, ex: 367 804 lignes, rend un fetch
+  // complet trop lourd quelle que soit la machine) : ces totaux portent sur l'ENSEMBLE filtré côté
+  // serveur, pas seulement la page affichée dans `data`.
+  const [journalTotalCount, setJournalTotalCount] = useState(0);
+  const [journalTotalDebit, setJournalTotalDebit] = useState(0);
+  const [journalTotalCredit, setJournalTotalCredit] = useState(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => { setJournalSearchDebounced(journalSearch); setJournalPage(1); }, 350);
+    return () => clearTimeout(t);
+  }, [journalSearch]);
 
   // --- DSF OHADA STATES ---
   const [dsfSubTab, setDsfSubTab] = useState('controls');
@@ -159,11 +171,28 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     }
   };
 
-  const fetchEtats = async (endpoint, forceAll = showAllDates) => {
+  const fetchEtats = async (endpoint, forceAll = showAllDates, highlightId = null) => {
     setLoading(true);
     setFetchError('');
     try {
-      const url = endpoint === 'journal' && forceAll ? '/api/journal?all=1' : `/api/${endpoint}`;
+      let url = `/api/${endpoint}`;
+      if (endpoint === 'journal') {
+        // Pagination côté serveur : un fetch complet non paginé (ex: 367 804 lignes observées en
+        // pratique) est trop lourd pour rester réactif, quelle que soit la machine. `highlightId`
+        // demande au serveur la page qui contient précisément cette écriture (saut depuis le Grand
+        // Livre), sinon on pagine normalement sur journalPage/journalPageSize.
+        const qp = new URLSearchParams();
+        if (forceAll) qp.set('all', '1');
+        if (journalSearchDebounced) qp.set('search', journalSearchDebounced);
+        if (highlightId) {
+          qp.set('highlightId', highlightId);
+          qp.set('limit', String(journalPageSize));
+        } else {
+          qp.set('limit', String(journalPageSize));
+          qp.set('offset', String((journalPage - 1) * journalPageSize));
+        }
+        url = `/api/journal?${qp.toString()}`;
+      }
       const res = await fetch(url);
       const text = await res.text();
       let json = null;
@@ -173,6 +202,15 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
 
       if (res.ok && json !== null) {
         setData(Array.isArray(json) ? json : (json.error ? [] : json));
+        if (endpoint === 'journal') {
+          setJournalTotalCount(Number(res.headers.get('X-Total-Count')) || 0);
+          setJournalTotalDebit(Number(res.headers.get('X-Total-Debit')) || 0);
+          setJournalTotalCredit(Number(res.headers.get('X-Total-Credit')) || 0);
+          const serverOffset = Number(res.headers.get('X-Offset'));
+          if (highlightId && !isNaN(serverOffset)) {
+            setJournalPage(Math.floor(serverOffset / journalPageSize) + 1);
+          }
+        }
         setLoading(false);
         return;
       }
@@ -203,11 +241,12 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   };
 
   useEffect(() => {
-    if (activeTab === 'journal') fetchEtats('journal', showAllDates);
+    if (activeTab === 'journal' && !highlightRowId) fetchEtats('journal', showAllDates);
     if (activeTab === 'balance') fetchEtats('balance');
     if (activeTab === 'bilan') fetchEtats('bilan');
     if (activeTab === 'resultat') fetchEtats('resultat');
-  }, [activeTab, showAllDates]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, showAllDates, journalPage, journalPageSize, journalSearchDebounced]);
 
   useEffect(() => {
     if (activeTab !== 'grandlivre') return;
@@ -245,19 +284,28 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   // et scrollée en vue) où elle peut être modifiée ou supprimée.
   const openJournalEntry = (id) => {
     setEditingRowId(null);
-    setJournalSearch(''); // Réinitialise le filtre de recherche pour s'assurer que la ligne est visible
+    // Réinitialise le filtre de recherche (immédiatement, sans attendre le debounce) pour ne pas
+    // risquer que la ligne ciblée soit exclue du jeu filtré côté serveur.
+    setJournalSearch('');
+    setJournalSearchDebounced('');
     setHighlightRowId(id);
     setActiveTab('journal');
   };
 
+  // Saut depuis le Grand Livre vers une écriture précise : avec la pagination côté serveur, on ne
+  // peut plus retrouver sa page depuis une liste déjà chargée en mémoire — on redemande directement
+  // au serveur la page qui la contient (voir highlightId dans fetchEtats / X-Offset).
+  useEffect(() => {
+    if (activeTab === 'journal' && highlightRowId) {
+      fetchEtats('journal', showAllDates, highlightRowId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, highlightRowId]);
+
   useEffect(() => {
     if (activeTab === 'journal' && highlightRowId && Array.isArray(data) && data.length > 0) {
-      const targetIdx = data.findIndex(r => r.id === highlightRowId || String(r.id) === String(highlightRowId));
-      if (targetIdx !== -1) {
-        if (journalPageSize > 0) {
-          const targetPage = Math.floor(targetIdx / journalPageSize) + 1;
-          setJournalPage(targetPage);
-        }
+      const found = data.some(r => r.id === highlightRowId || String(r.id) === String(highlightRowId));
+      if (found) {
         const timer = setTimeout(() => {
           if (highlightedRowRef.current) {
             highlightedRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -266,7 +314,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         return () => clearTimeout(timer);
       }
     }
-  }, [activeTab, highlightRowId, data, journalPageSize]);
+  }, [activeTab, highlightRowId, data]);
 
   const startEditRow = (row) => {
     setRowActionStatus('');
@@ -613,27 +661,15 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         );
 
       case 'journal': {
-        const rawList = Array.isArray(data) ? data : [];
-        const filteredJournal = rawList.filter(row => {
-          if (!journalSearch) return true;
-          const s = journalSearch.toLowerCase();
-          return (
-            (row.compte && String(row.compte).toLowerCase().includes(s)) ||
-            (row.compte_tiers && String(row.compte_tiers).toLowerCase().includes(s)) ||
-            (row.libelle && String(row.libelle).toLowerCase().includes(s)) ||
-            (row.code_journal && String(row.code_journal).toLowerCase().includes(s)) ||
-            (row.n_facture && String(row.n_facture).toLowerCase().includes(s)) ||
-            (row.reference && String(row.reference).toLowerCase().includes(s)) ||
-            (row.date && String(row.date).includes(s))
-          );
-        });
-
-        const totalPages = journalPageSize === 0 ? 1 : Math.ceil(filteredJournal.length / journalPageSize) || 1;
+        // Le Journal est désormais paginé et recherché côté serveur (voir fetchEtats) : `data` ne
+        // contient que la page courante, pas l'ensemble filtré. Les totaux/équilibre portent sur
+        // journalTotalCount/Debit/Credit, renvoyés par le serveur sur l'ensemble filtré.
+        const paginatedJournal = Array.isArray(data) ? data : [];
+        const totalPages = Math.ceil(journalTotalCount / journalPageSize) || 1;
         const safePage = Math.min(Math.max(1, journalPage), totalPages);
-        const paginatedJournal = journalPageSize === 0 ? filteredJournal : filteredJournal.slice((safePage - 1) * journalPageSize, safePage * journalPageSize);
 
-        const totalJournalDebit = filteredJournal.reduce((acc, r) => acc + (parseFloat(r.debit) || 0), 0);
-        const totalJournalCredit = filteredJournal.reduce((acc, r) => acc + (parseFloat(r.credit) || 0), 0);
+        const totalJournalDebit = journalTotalDebit;
+        const totalJournalCredit = journalTotalCredit;
         const journalEcart = Math.round((totalJournalDebit - totalJournalCredit) * 100) / 100;
         const isJournalEquilibre = Math.abs(journalEcart) < 0.01;
 
@@ -693,7 +729,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                     <option value={100}>100</option>
                     <option value={250}>250</option>
                     <option value={500}>500</option>
-                    <option value={0}>Tout</option>
+                    <option value={1000}>1000</option>
                   </select>
                 </div>
               </div>
@@ -707,7 +743,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
               <div className="card stat-card" style={{ padding: '0.75rem 1rem' }}>
                 <span className="stat-title" style={{ fontSize: '0.75rem' }}>Total Écritures</span>
                 <span className="stat-value" style={{ fontSize: '1.15rem' }}>
-                  {filteredJournal.length.toLocaleString()} {filteredJournal.length !== rawList.length ? `(sur ${rawList.length})` : ''}
+                  {journalTotalCount.toLocaleString()}
                 </span>
               </div>
               <div className="card stat-card" style={{ padding: '0.75rem 1rem' }}>
@@ -848,7 +884,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
                 marginTop: '1.5rem', padding: '0.75rem 0'
               }}>
                 <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-                  Page {safePage} sur {totalPages} ({filteredJournal.length} écritures)
+                  Page {safePage} sur {totalPages} ({journalTotalCount.toLocaleString()} écritures)
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <button

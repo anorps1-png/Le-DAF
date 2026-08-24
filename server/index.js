@@ -524,7 +524,7 @@ app.post('/api/import', upload.single('file'), (req, res) => {
             // Apprentissage automatique des règles depuis le journal importé (ML)
             let learnedCount = 0;
             try {
-              learnedCount = await learnFromJournalData(data);
+              learnedCount = await learnFromJournalData(data, 2);
             } catch (e) {
               console.error("Erreur apprentissage ML:", e);
             }
@@ -691,7 +691,7 @@ app.post('/api/import', upload.single('file'), (req, res) => {
         // Apprentissage automatique des nouvelles règles ML
         let learnedCount = 0;
         try {
-          learnedCount = await learnFromJournalData(journalEntriesForML);
+          learnedCount = await learnFromJournalData(journalEntriesForML, 2);
         } catch (e) {
           console.error("Erreur ML:", e);
         }
@@ -823,8 +823,12 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
         }
       });
     } else if (req.body && Array.isArray(req.body.journalRows)) {
+      // Soumission JSON (après écran de correction côté client) : contrairement au chemin fichier
+      // ci-dessus, ces lignes n'ont jamais transité par normalizeDate. Sans cet appel, une date
+      // encore au format brut (ex: "010226") est stockée telle quelle au lieu de "2026-02-01" et
+      // devient invisible dès qu'un exercice comptable est sélectionné (comparaison de texte).
       req.body.journalRows.forEach(r => {
-        journalRows.push(r);
+        journalRows.push({ ...r, date: normalizeDate(r.date) || r.date });
         totalDebit += parseFloat(r.debit) || 0;
         totalCredit += parseFloat(r.credit) || 0;
       });
@@ -880,7 +884,7 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
         
         let learnedCount = 0;
         try {
-          learnedCount = await learnFromJournalData(journalRows);
+          learnedCount = await learnFromJournalData(journalRows, 2);
         } catch (e) {
           console.error(e);
         }
@@ -964,17 +968,52 @@ app.get('/api/journal', async (req, res) => {
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    // Compte total AVANT pagination : sans exercice sélectionné (ou avec all=1), un import
+    // volumineux (ex: 367 804 lignes observées en pratique) rend un fetch non paginé du Journal
+    // trop lourd à sérialiser/transférer/parser pour rester réactif, quelle que soit la machine.
+    // Le total (via X-Total-Count) permet au client de paginer réellement côté serveur tout en
+    // pouvant toujours parcourir l'intégralité des écritures, page par page plutôt qu'en un bloc.
+    const countRow = await db.runSelect(`SELECT COUNT(*) as total FROM journal ${whereStr}`, sqlParams);
+    const totalCount = (countRow && countRow[0]) ? countRow[0].total : 0;
+
     let sql = `SELECT * FROM journal ${whereStr} ORDER BY date DESC, created_at DESC, id DESC`;
-    
-    if (req.query.limit) {
-      sql += ` LIMIT ?`;
-      sqlParams.push(Number(req.query.limit));
-      if (req.query.offset) {
-        sql += ` OFFSET ?`;
-        sqlParams.push(Number(req.query.offset));
+    const DEFAULT_JOURNAL_PAGE_SIZE = 50;
+    const limit = req.query.limit ? Number(req.query.limit) : DEFAULT_JOURNAL_PAGE_SIZE;
+    let offset = req.query.offset ? Number(req.query.offset) : 0;
+
+    // Saut depuis le Grand Livre vers une écriture précise : avec la pagination serveur, le client
+    // ne peut plus calculer la page cible depuis une liste complète déjà chargée. On calcule ici sa
+    // position réelle dans le tri courant (combien de lignes la précèdent) pour renvoyer directement
+    // la page qui la contient.
+    if (req.query.highlightId) {
+      const target = (await db.runSelect(`SELECT date, created_at, id FROM journal WHERE id = ?`, [req.query.highlightId]))[0];
+      if (target) {
+        const beforeClauses = [...whereClauses, '(date > ? OR (date = ? AND created_at > ?) OR (date = ? AND created_at = ? AND id > ?))'];
+        const beforeParams = [...sqlParams, target.date, target.date, target.created_at, target.date, target.created_at, target.id];
+        const beforeRow = await db.runSelect(`SELECT COUNT(*) as c FROM journal WHERE ${beforeClauses.join(' AND ')}`, beforeParams);
+        const countBefore = (beforeRow && beforeRow[0]) ? beforeRow[0].c : 0;
+        offset = Math.floor(countBefore / limit) * limit;
       }
     }
+
+    sql += ` LIMIT ?`;
+    sqlParams.push(limit);
+    sql += ` OFFSET ?`;
+    sqlParams.push(offset);
+
     const rows = await db.runSelect(sql, sqlParams);
+
+    // Totaux Débit/Crédit sur l'ENSEMBLE filtré (pas seulement la page courante) : l'indicateur
+    // d'équilibre est un contrôle comptable qui doit porter sur tout l'exercice/la recherche en
+    // cours, pas sur les 50 lignes affichées à l'écran.
+    const sumRow = await db.runSelect(`SELECT COALESCE(SUM(debit),0) as d, COALESCE(SUM(credit),0) as c FROM journal ${whereStr}`, sqlParams.slice(0, sqlParams.length - 2));
+
+    res.set('X-Offset', String(offset));
+    res.set('X-Total-Count', String(totalCount));
+    res.set('X-Total-Debit', String((sumRow && sumRow[0]) ? sumRow[0].d : 0));
+    res.set('X-Total-Credit', String((sumRow && sumRow[0]) ? sumRow[0].c : 0));
+    res.set('Access-Control-Expose-Headers', 'X-Total-Count, X-Offset, X-Total-Debit, X-Total-Credit');
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error('Error fetching journal:', err);
