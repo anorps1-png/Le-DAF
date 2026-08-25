@@ -413,7 +413,58 @@ function expandTreasuryCounterparts(rows) {
   return result;
 }
 
-app.post('/api/import', upload.single('file'), (req, res) => {
+// --- DÉDUPLICATION À L'IMPORT ---
+// Empêche qu'un même fichier (ré)importé — par erreur, ou parce qu'on ne sait plus s'il est déjà
+// passé — ne double chaque écriture en base : aucune contrainte UNIQUE n'existe sur `journal` et
+// aucun des chemins d'import ne vérifiait l'existant avant d'insérer. Deux écritures sont
+// considérées comme un doublon si tous leurs champs "métier" (hors id auto-incrémenté) sont
+// identiques.
+function journalRowFingerprint(r) {
+  return [
+    String(r.date || ''),
+    String(r.compte || '').trim(),
+    String(r.compte_tiers || '').trim().toLowerCase(),
+    String(r.libelle || '').trim().toLowerCase(),
+    String(r.n_facture || '').trim().toLowerCase(),
+    String(r.reference || '').trim().toLowerCase(),
+    (Number(r.debit) || 0).toFixed(2),
+    (Number(r.credit) || 0).toFixed(2),
+  ].join('||');
+}
+
+async function dedupeJournalRows(rows) {
+  if (!rows || rows.length === 0) return { rows: [], duplicates: 0 };
+  const dates = rows.map(r => r.date).filter(Boolean).sort();
+  const minDate = dates[0];
+  const maxDate = dates[dates.length - 1];
+  let existing = [];
+  try {
+    existing = minDate && maxDate
+      ? await db.runSelect(
+          `SELECT date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal WHERE date >= ? AND date <= ?`,
+          [minDate, maxDate]
+        )
+      : await db.runSelect(`SELECT date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal`, []);
+  } catch (e) {
+    existing = [];
+  }
+  const existingSet = new Set((existing || []).map(journalRowFingerprint));
+  const seenInBatch = new Set();
+  const kept = [];
+  let duplicates = 0;
+  rows.forEach(r => {
+    const fp = journalRowFingerprint(r);
+    if (existingSet.has(fp) || seenInBatch.has(fp)) {
+      duplicates++;
+    } else {
+      seenInBatch.add(fp);
+      kept.push(r);
+    }
+  });
+  return { rows: kept, duplicates };
+}
+
+app.post('/api/import', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier fourni' });
   const type = req.body.type; // 'tiers', 'journal'
 
@@ -441,12 +492,8 @@ app.post('/api/import', upload.single('file'), (req, res) => {
       stmt.finalize();
       res.json({ success: true, message: `${data.length} tiers importés avec succès.` });
     } else if (type === 'journal') {
-      db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-        const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        let inserted = 0;
-        const journalRows = [];
-        data.forEach(row => {
+      const journalRows = [];
+      data.forEach(row => {
           const normRow = {};
           for(let key in row) {
              const normKey = key.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
@@ -466,53 +513,57 @@ app.post('/api/import', upload.single('file'), (req, res) => {
 
           if (compte || debit > 0 || credit > 0) {
             journalRows.push({ code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit });
-            inserted++;
+          }
+      });
+
+      // Génération automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
+      const finalRows = expandTreasuryCounterparts(journalRows);
+
+      // Un fichier journal complet doit rester équilibré dans son ensemble.
+      const totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
+      const totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
+      if (Math.abs(totalDebit - totalCredit) > 0.01) {
+        const gap = Math.round(Math.abs(totalDebit - totalCredit));
+        const isDebitLarger = totalDebit > totalCredit;
+        const targetAccount = isDebitLarger ? '401100' : '411100';
+        const targetLabel = isDebitLarger
+          ? 'Régularisation Contrepartie Fournisseur (Équilibrage SYSCOHADA)'
+          : 'Régularisation Contrepartie Client (Équilibrage SYSCOHADA)';
+        const codeJournal = isDebitLarger ? 'AC' : 'VE';
+        const refDate = finalRows[0] ? finalRows[0].date : new Date().toISOString().split('T')[0];
+
+        return res.status(400).json({
+          error: `Fichier rejeté : le total des débits (${totalDebit.toLocaleString()}) ne correspond pas au total des crédits (${totalCredit.toLocaleString()}), écart de ${gap.toLocaleString()}. Corrigez le fichier avant de réimporter.`,
+          imbalance: {
+            totalDebit,
+            totalCredit,
+            gap,
+            isDebitLarger,
+            suggestedAccount: targetAccount,
+            suggestedLabel: targetLabel,
+            balancingRow: {
+              code_journal: codeJournal,
+              poste_budgetaire: 'RÉGULARISATION',
+              date: refDate,
+              compte: targetAccount,
+              compte_tiers: isDebitLarger ? 'FOURNISSEUR RÉGULARISATION' : 'CLIENT RÉGULARISATION',
+              libelle: targetLabel,
+              n_facture: 'REG-AUTO',
+              reference: 'EQUILIBRE-SYSCOHADA',
+              debit: isDebitLarger ? 0 : gap,
+              credit: isDebitLarger ? gap : 0
+            }
           }
         });
+      }
 
-        // Génération automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
-        const finalRows = expandTreasuryCounterparts(journalRows);
+      // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
+      const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
 
-        // Un fichier journal complet doit rester équilibré dans son ensemble.
-        const totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
-        const totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
-        if (Math.abs(totalDebit - totalCredit) > 0.01) {
-          db.run("ROLLBACK");
-          const gap = Math.round(Math.abs(totalDebit - totalCredit));
-          const isDebitLarger = totalDebit > totalCredit;
-          const targetAccount = isDebitLarger ? '401100' : '411100';
-          const targetLabel = isDebitLarger 
-            ? 'Régularisation Contrepartie Fournisseur (Équilibrage SYSCOHADA)' 
-            : 'Régularisation Contrepartie Client (Équilibrage SYSCOHADA)';
-          const codeJournal = isDebitLarger ? 'AC' : 'VE';
-          const refDate = finalRows[0] ? finalRows[0].date : new Date().toISOString().split('T')[0];
-
-          return res.status(400).json({
-            error: `Fichier rejeté : le total des débits (${totalDebit.toLocaleString()}) ne correspond pas au total des crédits (${totalCredit.toLocaleString()}), écart de ${gap.toLocaleString()}. Corrigez le fichier avant de réimporter.`,
-            imbalance: {
-              totalDebit,
-              totalCredit,
-              gap,
-              isDebitLarger,
-              suggestedAccount: targetAccount,
-              suggestedLabel: targetLabel,
-              balancingRow: {
-                code_journal: codeJournal,
-                poste_budgetaire: 'RÉGULARISATION',
-                date: refDate,
-                compte: targetAccount,
-                compte_tiers: isDebitLarger ? 'FOURNISSEUR RÉGULARISATION' : 'CLIENT RÉGULARISATION',
-                libelle: targetLabel,
-                n_facture: 'REG-AUTO',
-                reference: 'EQUILIBRE-SYSCOHADA',
-                debit: isDebitLarger ? 0 : gap,
-                credit: isDebitLarger ? gap : 0
-              }
-            }
-          });
-        }
-
-        finalRows.forEach(r => {
+      db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        dedupedRows.forEach(r => {
           stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
         });
         stmt.finalize();
@@ -528,8 +579,16 @@ app.post('/api/import', upload.single('file'), (req, res) => {
             } catch (e) {
               console.error("Erreur apprentissage ML:", e);
             }
+            // Rafraîchit les statistiques du planificateur SQLite en tâche de fond (sans bloquer
+            // la réponse) : un gros import change significativement la distribution des données.
+            db.run('ANALYZE', () => {});
 
-            let msg = `${inserted} écritures importées avec succès.`;
+            let msg = dedupedRows.length > 0
+              ? `${dedupedRows.length} écriture(s) importée(s) avec succès.`
+              : `Aucune nouvelle écriture importée.`;
+            if (duplicateCount > 0) {
+              msg += ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`;
+            }
             if (learnedCount > 0) {
               msg += ` 🧠 La Mémoire Métier a appris ${learnedCount} nouvelle(s) règle(s) d'imputation !`;
             }
@@ -550,6 +609,33 @@ app.post('/api/import', upload.single('file'), (req, res) => {
         // (plutôt qu'un compteur MAX(piece_id)+1) pour rester sans collision entre machines.
         let pieceId = null;
         const insertLine = (...args) => stmt.run(...args, pieceId);
+
+        // Empêche qu'un même modèle de factures importé deux fois ne double chaque facture/reçu :
+        // une facture est réputée déjà traitée si (date, n° facture/référence, tiers) existe déjà.
+        let duplicateInvoices = 0;
+        const seenInvoiceKeys = new Set();
+        let existingInvoiceKeys = new Set();
+        try {
+          const candidateDates = data.map(row => {
+            const normRow = {};
+            for (let key in row) {
+              const normKey = key.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]/g, "");
+              normRow[normKey] = row[key];
+            }
+            return normalizeDate(normRow['date']);
+          }).filter(Boolean).sort();
+          const minD = candidateDates[0];
+          const maxD = candidateDates[candidateDates.length - 1];
+          if (minD && maxD) {
+            const existingInvoices = await db.runSelect(
+              `SELECT DISTINCT date, n_facture, compte_tiers FROM journal WHERE date >= ? AND date <= ? AND n_facture IS NOT NULL AND n_facture != ''`,
+              [minD, maxD]
+            );
+            existingInvoiceKeys = new Set((existingInvoices || []).map(r =>
+              `${r.date}||${String(r.n_facture || '').trim().toLowerCase()}||${String(r.compte_tiers || '').trim().toLowerCase()}`
+            ));
+          }
+        } catch (e) {}
 
         for (const row of data) {
           const normRow = {};
@@ -593,6 +679,14 @@ app.post('/api/import', upload.single('file'), (req, res) => {
           if ((normStatut.includes('paye') || normStatut.includes('regle')) && !normStatut.includes('non') && !normStatut.includes('partiel') && montantPaye <= 0) {
             montantPaye = montantTTC;
           }
+
+          const invoiceRefKey = (isRecu ? (factureAssociee || numFacture) : numFacture).trim().toLowerCase();
+          const invoiceKey = `${date}||${invoiceRefKey}||${nomTiers.trim().toLowerCase()}`;
+          if (existingInvoiceKeys.has(invoiceKey) || seenInvoiceKeys.has(invoiceKey)) {
+            duplicateInvoices++;
+            continue;
+          }
+          seenInvoiceKeys.add(invoiceKey);
 
           totalInvoices++;
           pieceId = crypto.randomUUID();
@@ -695,8 +789,12 @@ app.post('/api/import', upload.single('file'), (req, res) => {
         } catch (e) {
           console.error("Erreur ML:", e);
         }
+        db.run('ANALYZE', () => {});
 
         let msg = `Génération automatique terminée : ${totalInvoices} facture(s) traitée(s), ${totalEntriesCreated} écriture(s) comptables équilibrées créées !`;
+        if (duplicateInvoices > 0) {
+          msg += ` ${duplicateInvoices} facture(s)/reçu(s) ignoré(s) car déjà présent(s) en base (doublon détecté).`;
+        }
         if (learnedCount > 0) {
           msg += ` 🧠 La Mémoire Métier a appris ${learnedCount} nouvelle(s) règle(s) d'imputation !`;
         }
@@ -870,28 +968,35 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
       balancingMessage = ` (Ligne d'équilibrage de contrepartie de ${gap.toLocaleString()} FCFA insérée au compte ${targetAccount})`;
     }
 
+    // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
+    const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
+
     db.serialize(() => {
       db.run("BEGIN TRANSACTION");
       const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-      
-      finalRows.forEach(r => {
+
+      dedupedRows.forEach(r => {
         stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
       });
       stmt.finalize();
 
       db.run("COMMIT", async (err) => {
         if (err) return res.status(500).json({ error: 'Erreur d\'enregistrement en base.' });
-        
+
         let learnedCount = 0;
         try {
           learnedCount = await learnFromJournalData(journalRows, 2);
         } catch (e) {
           console.error(e);
         }
+        db.run('ANALYZE', () => {});
 
+        let dedupMsg = duplicateCount > 0
+          ? ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`
+          : '';
         res.json({
           success: true,
-          message: `Correction & Importation réussies : ${journalRows.length} écritures équilibrées sauvegardées !${balancingMessage}`
+          message: `Correction & Importation réussies : ${dedupedRows.length} écriture(s) sauvegardée(s) !${balancingMessage}${dedupMsg}`
         });
       });
     });
@@ -1605,9 +1710,12 @@ app.get('/api/export/etats-financiers', async (req, res) => {
     const format = (req.query.format || 'excel').toLowerCase(); // 'excel' ou 'pdf'
     const searchParam = String(req.query.search || req.query.compte || '').trim().toLowerCase();
     const classeParam = String(req.query.classe || '').trim();
+    // Doit refléter le même bouton "Toutes les dates" que l'onglet Journal (voir /api/journal) :
+    // sinon l'export reste silencieusement restreint à l'exercice actif même quand l'écran affiche tout.
+    const isAll = req.query.all === 'true' || req.query.all === '1';
 
-    const { clause, params } = await getExerciceDateFilter();
-    
+    const { clause, params } = isAll ? { clause: '', params: [] } : await getExerciceDateFilter();
+
     // Fetch custom account titles map
     const customRows = await db.runSelect("SELECT compte, libelle FROM chart_of_accounts");
     const customMap = {};
@@ -1638,10 +1746,16 @@ app.get('/api/export/etats-financiers', async (req, res) => {
 
     const journalRows = rawJournalRows.filter(r => {
       const compteStr = String(r.compte || '');
-      const label = getAccountLabelServer(compteStr, customMap).toLowerCase();
-      const matchSearch = !searchParam || compteStr.startsWith(searchParam) || compteStr.includes(searchParam) || label.includes(searchParam);
       const matchClass = !classeParam || compteStr.startsWith(classeParam);
-      return matchSearch && matchClass;
+      if (!matchClass) return false;
+      if (!searchParam) return true;
+      // Mêmes champs que la recherche de l'onglet Journal à l'écran (voir /api/journal) : sans ça,
+      // un export filtré par libellé/n° facture/référence/tiers/code journal ne matchait jamais rien
+      // et renvoyait un fichier différent de ce que l'utilisateur voyait affiché.
+      const haystack = [r.compte, r.libelle, r.n_facture, r.reference, r.compte_tiers, r.code_journal]
+        .map(v => String(v == null ? '' : v).toLowerCase())
+        .join(' | ');
+      return haystack.includes(searchParam);
     });
 
     const { bilan, resultat } = computeEtatsFinanciers(rawBalanceRows);
@@ -1842,7 +1956,15 @@ app.get('/api/export/etats-financiers', async (req, res) => {
         drawJournalHeader(y);
         y += 22;
 
-        (journalRows || []).slice(0, 500).forEach(r => {
+        // Un PDF de dizaines/centaines de milliers de lignes n'est plus exploitable (ni même
+        // générable dans un temps raisonnable) : on plafonne l'AFFICHAGE, mais les totaux ci-dessous
+        // portent toujours sur la TOTALITÉ de `journalRows`, jamais sur le seul extrait imprimé — et
+        // un avertissement explicite remplace la troncature silencieuse d'origine.
+        const PDF_JOURNAL_MAX_ROWS = 2000;
+        const journalRowsAll = journalRows || [];
+        const truncated = journalRowsAll.length > PDF_JOURNAL_MAX_ROWS;
+
+        journalRowsAll.slice(0, PDF_JOURNAL_MAX_ROWS).forEach(r => {
           if (checkPageBreak(20)) {
             y = doc.y;
             drawJournalHeader(y);
@@ -1866,7 +1988,28 @@ app.get('/api/export/etats-financiers', async (req, res) => {
           y += 18;
         });
 
-        doc.y = y + 25;
+        if (checkPageBreak(30)) y = doc.y;
+        const jTotalDebit = journalRowsAll.reduce((s, r) => s + (r.debit || 0), 0);
+        const jTotalCredit = journalRowsAll.reduce((s, r) => s + (r.credit || 0), 0);
+        const jEcart = jTotalDebit - jTotalCredit;
+        doc.rect(30, y, contentWidth, 18).fillAndStroke('#f1f5f9', '#cbd5e1');
+        doc.fillColor('#0f172a').fontSize(8).font('Helvetica-Bold');
+        doc.text('TOTAL GÉNÉRAL (toutes écritures)', 33, y + 5, { width: 300, align: 'left' });
+        doc.text(Math.round(jTotalDebit).toLocaleString(), 30 + jColWidths.slice(0, 8).reduce((s, w) => s + w, 0) + 3, y + 5, { width: jColWidths[8] - 6, align: 'right' });
+        doc.text(Math.round(jTotalCredit).toLocaleString(), 30 + jColWidths.slice(0, 9).reduce((s, w) => s + w, 0) + 3, y + 5, { width: jColWidths[9] - 6, align: 'right' });
+        y += 18;
+
+        doc.fontSize(8).font('Helvetica-Bold').fillColor(Math.abs(jEcart) < 1 ? '#15803d' : '#b91c1c');
+        doc.text(Math.abs(jEcart) < 1 ? '✓ Journal équilibré (Débit = Crédit)' : `⚠ Journal déséquilibré — écart de ${Math.round(jEcart).toLocaleString()} FCFA`, 30, y + 4);
+        y += 16;
+
+        if (truncated) {
+          doc.fontSize(7.5).font('Helvetica-Oblique').fillColor('#b91c1c');
+          doc.text(`⚠ Aperçu limité aux ${PDF_JOURNAL_MAX_ROWS.toLocaleString()} premières écritures sur ${journalRowsAll.length.toLocaleString()} au total (les totaux ci-dessus portent bien sur l'intégralité). Utilisez l'export Excel pour obtenir toutes les écritures en détail.`, 30, y + 2, { width: contentWidth });
+          y += 20;
+        }
+
+        doc.y = y + 15;
       }
 
       // 3. RENDER BILAN TABLE (IF REQUESTED)
@@ -2048,7 +2191,12 @@ app.get('/api/export/etats-financiers', async (req, res) => {
         ["JOURNAL GÉNÉRAL DES ÉCRITURES"],
         ["ID", "Date", "Code Journal", "Budget", "N° Compte", "Compte Tiers", "Libellé écriture", "N° Facture", "Référence", "Débit", "Crédit"]
       ];
+      let journalSumDebit = 0, journalSumCredit = 0;
       journalRows.forEach(r => {
+        const debit = r.debit || 0;
+        const credit = r.credit || 0;
+        journalSumDebit += debit;
+        journalSumCredit += credit;
         journalAoa.push([
           r.id,
           r.date,
@@ -2059,10 +2207,17 @@ app.get('/api/export/etats-financiers', async (req, res) => {
           r.libelle,
           r.n_facture,
           r.reference,
-          r.debit || 0,
-          r.credit || 0
+          debit,
+          credit
         ]);
       });
+      // Totaux + indicateur d'équilibre, cohérents avec ce qu'affiche l'onglet Journal à l'écran
+      // (voir isJournalEquilibre côté frontend) : sans ça, le fichier exporté ne permettait pas de
+      // vérifier que le journal exporté est bien équilibré.
+      const journalEcart = journalSumDebit - journalSumCredit;
+      journalAoa.push([]);
+      journalAoa.push(["", "", "", "", "", "", "TOTAL GÉNÉRAL", "", "", journalSumDebit, journalSumCredit]);
+      journalAoa.push(["", "", "", "", "", "", Math.abs(journalEcart) < 1 ? "✓ Équilibré (Débit = Crédit)" : `⚠ Déséquilibré — écart de ${journalEcart.toLocaleString('fr-FR')} FCFA`]);
       xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(journalAoa), "Journal_General");
     }
 

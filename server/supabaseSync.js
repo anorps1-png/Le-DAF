@@ -1,3 +1,15 @@
+// @supabase/supabase-js construit systématiquement un RealtimeClient à la création (même si
+// l'app n'utilise jamais les abonnements realtime, seulement REST via .from()), et celui-ci
+// résout une implémentation WebSocket dès le constructeur : sans WebSocket global, il lève
+// immédiatement "Node.js detected but native WebSocket not found." Node l'expose en global
+// depuis la v22, mais Electron 34 embarque Node 20.18.1 - createClient() y échouait donc
+// systématiquement (rattrapé silencieusement, d'où "Impossible d'initialiser la connexion
+// Supabase" à chaque PUSH/PULL depuis l'app packagée, alors que ça fonctionnait en dev avec un
+// Node système plus récent).
+if (typeof globalThis.WebSocket === 'undefined') {
+  globalThis.WebSocket = require('ws');
+}
+
 const { createClient } = require('@supabase/supabase-js');
 const db = require('./db');
 

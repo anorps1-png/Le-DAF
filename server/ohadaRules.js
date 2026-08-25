@@ -199,6 +199,15 @@ function computeEtatsFinanciers(rows) {
 
   const comptesNonClasses = [];
 
+  // Détail par compte de chaque masse agrégée (clés miroir de `b`/`r` ci-dessus), pour permettre au
+  // frontend d'afficher les comptes qui composent un poste du Bilan/Résultat au clic (drill-down).
+  const details = {};
+  const resultatDetails = [];
+  const pushDetail = (bucket, compte, debit, credit) => {
+    if (!details[bucket]) details[bucket] = [];
+    details[bucket].push({ compte, debit, credit });
+  };
+
   (rows || []).forEach(row => {
     const compte = String(row.compte || '');
     const debit = row.total_debit || 0;
@@ -211,53 +220,54 @@ function computeEtatsFinanciers(rows) {
 
     if (bilanCat) {
       switch (bilanCat) {
-        case 'CAPITAL': b.capital += netCred; break;
-        case 'RESERVES': b.reserves += netCred; break;
-        case 'REPORT_A_NOUVEAU': b.reportANouveau += netCred; break; // signé : + si créditeur, - si débiteur
+        case 'CAPITAL': b.capital += netCred; pushDetail('capital', compte, debit, credit); break;
+        case 'RESERVES': b.reserves += netCred; pushDetail('reserves', compte, debit, credit); break;
+        case 'REPORT_A_NOUVEAU': b.reportANouveau += netCred; pushDetail('reportANouveau', compte, debit, credit); break; // signé : + si créditeur, - si débiteur
         case 'RESULTAT_NET_BILAN': break; // ignoré : le résultat net réel vient du compte de résultat (voir plus bas)
-        case 'SUBVENTIONS_INVESTISSEMENT': b.subventionsInvestissement += netCred; break;
-        case 'PROVISIONS_REGLEMENTEES': b.provisionsReglementees += netCred; break;
-        case 'DETTES_FINANCIERES': b.dettesFinancieres += netCred; break;
-        case 'PROVISIONS_RISQUES': b.provisionsRisques += netCred; break;
-        case 'IMMO_INCORPORELLES': b.immoIncorpBrut += netDeb; break;
-        case 'IMMO_CORPORELLES': b.immoCorpBrut += netDeb; break;
-        case 'IMMO_FINANCIERES': b.immoFinBrut += netDeb; break;
-        case 'AMORTISSEMENTS': b.amortissements += netCred; break;
-        case 'DEPRECIATIONS_IMMO': b.depreciationsImmo += netCred; break;
-        case 'STOCKS': b.stocksBrut += netDeb; break;
-        case 'DEPRECIATIONS_STOCKS': b.depreciationsStocks += netCred; break;
+        case 'SUBVENTIONS_INVESTISSEMENT': b.subventionsInvestissement += netCred; pushDetail('subventionsInvestissement', compte, debit, credit); break;
+        case 'PROVISIONS_REGLEMENTEES': b.provisionsReglementees += netCred; pushDetail('provisionsReglementees', compte, debit, credit); break;
+        case 'DETTES_FINANCIERES': b.dettesFinancieres += netCred; pushDetail('dettesFinancieres', compte, debit, credit); break;
+        case 'PROVISIONS_RISQUES': b.provisionsRisques += netCred; pushDetail('provisionsRisques', compte, debit, credit); break;
+        case 'IMMO_INCORPORELLES': b.immoIncorpBrut += netDeb; pushDetail('immoIncorpBrut', compte, debit, credit); break;
+        case 'IMMO_CORPORELLES': b.immoCorpBrut += netDeb; pushDetail('immoCorpBrut', compte, debit, credit); break;
+        case 'IMMO_FINANCIERES': b.immoFinBrut += netDeb; pushDetail('immoFinBrut', compte, debit, credit); break;
+        case 'AMORTISSEMENTS': b.amortissements += netCred; pushDetail('amortissements', compte, debit, credit); break;
+        case 'DEPRECIATIONS_IMMO': b.depreciationsImmo += netCred; pushDetail('depreciationsImmo', compte, debit, credit); break;
+        case 'STOCKS': b.stocksBrut += netDeb; pushDetail('stocksBrut', compte, debit, credit); break;
+        case 'DEPRECIATIONS_STOCKS': b.depreciationsStocks += netCred; pushDetail('depreciationsStocks', compte, debit, credit); break;
         case 'FOURNISSEURS':
           // Un compte fournisseur normalement créditeur (dette) peut finir débiteur (avance versée) :
           // chaque signe doit atterrir dans sa masse propre, jamais être ignoré (§2 Achats/Ventes).
-          if (netCred > 0) b.fournisseursCredit += netCred;
-          if (netDeb > 0) b.fournisseursDebitReverse += netDeb;
+          if (netCred > 0) { b.fournisseursCredit += netCred; pushDetail('fournisseursCredit', compte, debit, credit); }
+          if (netDeb > 0) { b.fournisseursDebitReverse += netDeb; pushDetail('fournisseursDebitReverse', compte, debit, credit); }
           break;
         case 'CLIENTS':
           // Symétrique : un compte client normalement débiteur (créance) peut finir créditeur
           // (avance reçue) — compte 419 (§1 Plan de comptes, constantes de numérotation).
-          if (netDeb > 0) b.clientsDebit += netDeb;
-          if (netCred > 0) b.clientsCreditReverse += netCred;
+          if (netDeb > 0) { b.clientsDebit += netDeb; pushDetail('clientsDebit', compte, debit, credit); }
+          if (netCred > 0) { b.clientsCreditReverse += netCred; pushDetail('clientsCreditReverse', compte, debit, credit); }
           break;
         case 'AUTRES_TIERS':
-          if (netDeb > 0) b.autresTiersDebit += netDeb;
-          if (netCred > 0) b.autresTiersCredit += netCred;
+          if (netDeb > 0) { b.autresTiersDebit += netDeb; pushDetail('autresTiersDebit', compte, debit, credit); }
+          if (netCred > 0) { b.autresTiersCredit += netCred; pushDetail('autresTiersCredit', compte, debit, credit); }
           break;
-        case 'DEPRECIATIONS_TIERS': b.depreciationsTiers += netCred; break;
-        case 'PROVISIONS_CT': b.provisionsCT += netCred; break;
+        case 'DEPRECIATIONS_TIERS': b.depreciationsTiers += netCred; pushDetail('depreciationsTiers', compte, debit, credit); break;
+        case 'PROVISIONS_CT': b.provisionsCT += netCred; pushDetail('provisionsCT', compte, debit, credit); break;
         case 'TRESORERIE':
           // Une banque/caisse normalement débitrice peut finir créditrice (découvert) : traitée
           // comme du passif de trésorerie plutôt que d'être ignorée (§4 Opérations de trésorerie).
-          if (netDeb > 0) b.tresorerieDebit += netDeb;
-          if (netCred > 0) b.tresorerieCredit += netCred;
+          if (netDeb > 0) { b.tresorerieDebit += netDeb; pushDetail('tresorerieDebit', compte, debit, credit); }
+          if (netCred > 0) { b.tresorerieCredit += netCred; pushDetail('tresorerieCredit', compte, debit, credit); }
           break;
-        case 'DEPRECIATIONS_TRESORERIE': b.depreciationsTresorerie += netCred; break;
-        case 'ECART_CONVERSION_ACTIF': b.ecartConversionActif += netDeb; break;
-        case 'ECART_CONVERSION_PASSIF': b.ecartConversionPassif += netCred; break;
+        case 'DEPRECIATIONS_TRESORERIE': b.depreciationsTresorerie += netCred; pushDetail('depreciationsTresorerie', compte, debit, credit); break;
+        case 'ECART_CONVERSION_ACTIF': b.ecartConversionActif += netDeb; pushDetail('ecartConversionActif', compte, debit, credit); break;
+        case 'ECART_CONVERSION_PASSIF': b.ecartConversionPassif += netCred; pushDetail('ecartConversionPassif', compte, debit, credit); break;
         default: break;
       }
     }
 
     if (resultatCat) {
+      resultatDetails.push({ compte, debit, credit });
       switch (resultatCat) {
         case 'ACHATS_MARCHANDISES': r.achatsMarchandises += netDeb; break;
         case 'VARIATION_STOCK_MARCHANDISES': r.variationStockMarchandises += netDeb; break;
@@ -386,6 +396,35 @@ function computeEtatsFinanciers(rows) {
   const totalActif = totalImmobilisationsNettes + totalActifCirculant + tresorerieActifNet + b.ecartConversionActif;
   const totalPassif = totalRessourcesStables + totalPassifCirculant + tresoreriePassif + b.ecartConversionPassif;
 
+  // Détail par compte de chaque ligne du Bilan telle qu'affichée côté frontend (voir renderRow dans
+  // ComptabiliteModule.jsx) : permet le drill-down au clic sans dupliquer la logique de classement
+  // ci-dessus — chaque poste regroupe exactement les mêmes buckets `details.*` que ceux utilisés
+  // pour calculer sa valeur agrégée.
+  const dget = (bucket) => details[bucket] || [];
+  const posteDetails = {
+    immobilisationsIncorporelles: dget('immoIncorpBrut'),
+    immobilisationsCorporelles: [...dget('immoCorpBrut'), ...dget('amortissements'), ...dget('depreciationsImmo')],
+    immobilisationsFinancieres: dget('immoFinBrut'),
+    stocks: [...dget('stocksBrut'), ...dget('depreciationsStocks')],
+    creancesClients: [...dget('clientsDebit'), ...dget('depreciationsTiers')],
+    autresCreances: [...dget('fournisseursDebitReverse'), ...dget('autresTiersDebit')],
+    tresorerieActif: [...dget('tresorerieDebit'), ...dget('depreciationsTresorerie')],
+    ecartConversionActif: dget('ecartConversionActif'),
+
+    capital: dget('capital'),
+    reserves: dget('reserves'),
+    reportANouveau: dget('reportANouveau'),
+    resultatNetExercice: resultatDetails,
+    subventionsInvestissement: dget('subventionsInvestissement'),
+    provisionsReglementees: dget('provisionsReglementees'),
+    dettesFinancieres: dget('dettesFinancieres'),
+    provisionsRisquesCharges: [...dget('provisionsRisques'), ...dget('provisionsCT')],
+    dettesFournisseurs: dget('fournisseursCredit'),
+    autresDettes: [...dget('clientsCreditReverse'), ...dget('autresTiersCredit')],
+    tresoreriePassif: dget('tresorerieCredit'),
+    ecartConversionPassif: dget('ecartConversionPassif'),
+  };
+
   const bilan = {
     actif: {
       immobilisationsIncorporelles,
@@ -418,6 +457,7 @@ function computeEtatsFinanciers(rows) {
       ecartConversionPassif: b.ecartConversionPassif,
       totalPassif,
     },
+    details: posteDetails,
   };
 
   return { bilan, resultat, comptesNonClasses };

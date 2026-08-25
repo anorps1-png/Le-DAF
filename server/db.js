@@ -594,6 +594,12 @@ async function initSchema() {
   }
 
   console.log('[DB] Schéma prêt.');
+
+  // ANALYZE (statistiques du planificateur de requêtes) en tâche de fond, sans bloquer le
+  // démarrage : sans ça, sur une grosse base jamais analysée, le planificateur SQLite peut choisir
+  // un plan très défavorable pour des agrégats peu sélectifs (ex: SUM(debit)/SUM(credit) sur tout
+  // un exercice comptable) - observé concrètement à 66 secondes au lieu de 70ms sur 72k écritures.
+  run('ANALYZE').catch(() => {});
 }
 
 db.runSelect = function (sql, params = []) {

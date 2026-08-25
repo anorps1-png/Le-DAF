@@ -29,6 +29,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
   const [manualStatus, setManualStatus] = useState('');
   const [memoryMatch, setMemoryMatch] = useState({});
   const [fetchError, setFetchError] = useState('');
+  const [bilanExpandedPoste, setBilanExpandedPoste] = useState(null);
   const [balanceFilterCompte, setBalanceFilterCompte] = useState('');
   const [balanceClassFilter, setBalanceClassFilter] = useState('');
   const [balanceFilter, setBalanceFilter] = useState('');
@@ -1260,52 +1261,95 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
         const stocks = a.stocks || {};
         const creances = a.creancesClients || {};
 
+        const details = data?.details || {};
+
         const actifRows = [
-          { label: 'Immobilisations incorporelles (brut)', value: immoIncorp.brut || 0 },
-          { label: 'Immobilisations corporelles (brut)', value: immoCorp.brut || 0 },
-          { label: 'Immobilisations financières (brut)', value: immoFin.brut || 0 },
-          { label: 'Amortissements', value: -((immoCorp.amortissements || 0)), negative: true },
-          { label: 'Dépréciations sur immobilisations', value: -((immoIncorp.depreciations || 0) + (immoCorp.depreciations || 0) + (immoFin.depreciations || 0)), negative: true },
+          { label: 'Immobilisations incorporelles (brut)', value: immoIncorp.brut || 0, posteKey: 'immobilisationsIncorporelles' },
+          { label: 'Immobilisations corporelles (brut)', value: immoCorp.brut || 0, posteKey: 'immobilisationsCorporelles' },
+          { label: 'Immobilisations financières (brut)', value: immoFin.brut || 0, posteKey: 'immobilisationsFinancieres' },
+          { label: 'Amortissements', value: -((immoCorp.amortissements || 0)), negative: true, posteKey: 'immobilisationsCorporelles' },
+          { label: 'Dépréciations sur immobilisations', value: -((immoIncorp.depreciations || 0) + (immoCorp.depreciations || 0) + (immoFin.depreciations || 0)), negative: true, posteKey: 'immobilisationsCorporelles' },
           { label: 'Immobilisations nettes', value: a.totalImmobilisationsNettes || 0, subtotal: true },
-          { label: 'Stocks (brut)', value: stocks.brut || 0 },
-          { label: 'Dépréciations sur stocks', value: -(stocks.depreciations || 0), negative: true },
-          { label: 'Créances clients (brut)', value: creances.brut || 0 },
-          { label: 'Dépréciations sur créances', value: -(creances.depreciations || 0), negative: true },
-          { label: 'Autres créances', value: a.autresCreances || 0 },
+          { label: 'Stocks (brut)', value: stocks.brut || 0, posteKey: 'stocks' },
+          { label: 'Dépréciations sur stocks', value: -(stocks.depreciations || 0), negative: true, posteKey: 'stocks' },
+          { label: 'Créances clients (brut)', value: creances.brut || 0, posteKey: 'creancesClients' },
+          { label: 'Dépréciations sur créances', value: -(creances.depreciations || 0), negative: true, posteKey: 'creancesClients' },
+          { label: 'Autres créances', value: a.autresCreances || 0, posteKey: 'autresCreances' },
           { label: 'Total actif circulant', value: a.totalActifCirculant || 0, subtotal: true },
-          { label: 'Trésorerie', value: a.tresorerieActif || 0 },
-          ...(a.ecartConversionActif ? [{ label: 'Écart de conversion actif', value: a.ecartConversionActif }] : []),
+          { label: 'Trésorerie', value: a.tresorerieActif || 0, posteKey: 'tresorerieActif' },
+          ...(a.ecartConversionActif ? [{ label: 'Écart de conversion actif', value: a.ecartConversionActif, posteKey: 'ecartConversionActif' }] : []),
         ];
         const passifRows = [
-          { label: 'Capital', value: p.capital || 0 },
-          { label: 'Réserves', value: p.reserves || 0 },
-          { label: 'Report à nouveau', value: p.reportANouveau || 0 },
-          { label: "Résultat net de l'exercice", value: p.resultatNetExercice || 0 },
-          { label: "Subventions d'investissement", value: p.subventionsInvestissement || 0 },
-          { label: 'Provisions réglementées', value: p.provisionsReglementees || 0 },
+          { label: 'Capital', value: p.capital || 0, posteKey: 'capital' },
+          { label: 'Réserves', value: p.reserves || 0, posteKey: 'reserves' },
+          { label: 'Report à nouveau', value: p.reportANouveau || 0, posteKey: 'reportANouveau' },
+          { label: "Résultat net de l'exercice", value: p.resultatNetExercice || 0, posteKey: 'resultatNetExercice' },
+          { label: "Subventions d'investissement", value: p.subventionsInvestissement || 0, posteKey: 'subventionsInvestissement' },
+          { label: 'Provisions réglementées', value: p.provisionsReglementees || 0, posteKey: 'provisionsReglementees' },
           { label: 'Total capitaux propres', value: p.totalCapitauxPropres || 0, subtotal: true },
-          { label: 'Dettes financières', value: p.dettesFinancieres || 0 },
-          { label: 'Provisions pour risques et charges', value: p.provisionsRisquesCharges || 0 },
+          { label: 'Dettes financières', value: p.dettesFinancieres || 0, posteKey: 'dettesFinancieres' },
+          { label: 'Provisions pour risques et charges', value: p.provisionsRisquesCharges || 0, posteKey: 'provisionsRisquesCharges' },
           { label: 'Total ressources stables', value: p.totalRessourcesStables || 0, subtotal: true },
-          { label: 'Dettes fournisseurs', value: p.dettesFournisseurs || 0 },
-          { label: 'Autres dettes', value: p.autresDettes || 0 },
+          { label: 'Dettes fournisseurs', value: p.dettesFournisseurs || 0, posteKey: 'dettesFournisseurs' },
+          { label: 'Autres dettes', value: p.autresDettes || 0, posteKey: 'autresDettes' },
           { label: 'Total passif circulant', value: p.totalPassifCirculant || 0, subtotal: true },
-          { label: 'Trésorerie passif', value: p.tresoreriePassif || 0 },
-          ...(p.ecartConversionPassif ? [{ label: 'Écart de conversion passif', value: p.ecartConversionPassif }] : []),
+          { label: 'Trésorerie passif', value: p.tresoreriePassif || 0, posteKey: 'tresoreriePassif' },
+          ...(p.ecartConversionPassif ? [{ label: 'Écart de conversion passif', value: p.ecartConversionPassif, posteKey: 'ecartConversionPassif' }] : []),
         ];
         const totalActif = a.totalActif || 0;
         const totalPassif = p.totalPassif || 0;
         const equilibre = Math.abs(totalActif - totalPassif) < 1;
         const nonClasses = data?.comptesNonClasses || [];
 
-        const renderRow = (row, idx) => (
-          <tr key={idx} style={row.subtotal
-            ? { borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)', fontWeight: 600, background: 'rgba(0,0,0,0.02)' }
-            : { borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
-            <td style={{ padding: '0.6rem 0', paddingLeft: row.subtotal ? 0 : '0.5rem', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>{row.label}</td>
-            <td style={{ textAlign: 'right', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>{row.value.toLocaleString()} FCFA</td>
-          </tr>
-        );
+        const renderRow = (row, idx) => {
+          const clickable = !row.subtotal && !!row.posteKey;
+          const comptes = clickable ? (details[row.posteKey] || []) : [];
+          const isExpanded = clickable && bilanExpandedPoste === row.posteKey;
+          return (
+            <Fragment key={idx}>
+              <tr
+                onClick={clickable ? () => setBilanExpandedPoste(isExpanded ? null : row.posteKey) : undefined}
+                style={{
+                  ...(row.subtotal
+                    ? { borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)', fontWeight: 600, background: 'rgba(0,0,0,0.02)' }
+                    : { borderBottom: '1px solid rgba(0,0,0,0.05)' }),
+                  cursor: clickable ? 'pointer' : 'default',
+                  background: isExpanded ? 'rgba(99, 102, 241, 0.08)' : (row.subtotal ? 'rgba(0,0,0,0.02)' : undefined),
+                }}
+                title={clickable ? 'Cliquer pour voir le détail des comptes' : undefined}
+              >
+                <td style={{ padding: '0.6rem 0', paddingLeft: row.subtotal ? 0 : '0.5rem', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>
+                  {clickable && <span style={{ display: 'inline-block', width: '1rem', color: 'var(--color-text-muted)' }}>{isExpanded ? '▾' : '▸'}</span>}
+                  {row.label}
+                </td>
+                <td style={{ textAlign: 'right', color: row.negative ? 'var(--color-text-muted)' : 'inherit' }}>{row.value.toLocaleString()} FCFA</td>
+              </tr>
+              {isExpanded && (
+                comptes.length > 0 ? comptes.map((c, ci) => (
+                  <tr
+                    key={`${idx}-${ci}`}
+                    onClick={() => openGrandLivre(c.compte)}
+                    style={{ background: 'rgba(0,0,0,0.015)', cursor: 'pointer', fontSize: '0.82rem' }}
+                    title="Ouvrir le Grand Livre de ce compte"
+                  >
+                    <td style={{ padding: '0.35rem 0 0.35rem 2.25rem', color: 'var(--color-text-muted)' }}>
+                      {c.compte} — {getAccountLabel(c.compte)}
+                    </td>
+                    <td style={{ textAlign: 'right', color: 'var(--color-text-muted)' }}>
+                      {(c.debit || 0).toLocaleString()} / {(c.credit || 0).toLocaleString()} FCFA
+                    </td>
+                  </tr>
+                )) : (
+                  <tr key={`${idx}-empty`}>
+                    <td colSpan={2} style={{ padding: '0.35rem 0 0.35rem 2.25rem', color: 'var(--color-text-muted)', fontSize: '0.82rem', fontStyle: 'italic' }}>
+                      Aucun compte détaillé pour ce poste.
+                    </td>
+                  </tr>
+                )
+              )}
+            </Fragment>
+          );
+        };
 
         return (
           <div>
@@ -1967,6 +2011,13 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     if (activeTab === 'balance') {
       if (balanceFilterCompte) url += `&search=${encodeURIComponent(balanceFilterCompte)}`;
       if (balanceClassFilter) url += `&classe=${encodeURIComponent(balanceClassFilter)}`;
+    }
+    // Le bouton annonce "respecte les filtres actifs" : sans ça, exporter depuis l'onglet Journal
+    // ignorait silencieusement la recherche tapée à l'écran et le bouton "Toutes les dates", renvoyant
+    // un fichier différent de ce qui était affiché.
+    if (activeTab === 'journal') {
+      if (journalSearchDebounced) url += `&search=${encodeURIComponent(journalSearchDebounced)}`;
+      if (showAllDates) url += `&all=1`;
     }
     window.location.href = url;
   };
