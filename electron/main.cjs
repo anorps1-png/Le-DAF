@@ -2,6 +2,14 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const path = require('path');
 const http = require('http');
 
+// Le serveur Express (server/index.js) est chargé via require() directement dans ce processus
+// principal (voir startBackendServer ci-dessous), donc il tourne sur le même tas V8 qu'Electron.
+// La limite par défaut (~2,2 Go sur une machine à mémoire modeste) est trop juste pour un import
+// comptable de plusieurs centaines de milliers à ~1,5M de lignes (fichier Excel entier tenu en
+// mémoire, plusieurs copies du tableau de lignes le temps du traitement). Doit être fait AVANT
+// app.whenReady().
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
+
 let mainWindow = null;
 const PORT = process.env.PORT || 3003;
 

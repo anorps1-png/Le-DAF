@@ -40,17 +40,32 @@ async function saveCompanyInfo(data) {
   }
 }
 
+// La DSF est une déclaration par exercice fiscal : la balance doit être bornée à l'exercice
+// sélectionné (settings.SELECTED_EXERCICE_ID), comme /api/bilan, /api/resultat et /api/journal
+// (voir getExerciceDateFilter dans server/index.js) — sinon elle porte sur tout l'historique.
+async function getExerciceDateFilter() {
+  const settingsRows = await db.runSelect("SELECT value FROM settings WHERE key = 'SELECTED_EXERCICE_ID'");
+  const id = settingsRows[0] && settingsRows[0].value;
+  if (!id) return { clause: '', params: [] };
+  const exRows = await db.runSelect("SELECT date_debut, date_fin FROM exercices WHERE id = ?", [id]);
+  const ex = exRows[0];
+  if (!ex) return { clause: '', params: [] };
+  return { clause: 'date >= ? AND date <= ?', params: [ex.date_debut, ex.date_fin] };
+}
+
 // Calcul complet des données du dossier DSF OHADA
 async function computeDSFData() {
   const companyInfo = await getCompanyInfo();
 
-  // Balance cumulée
+  // Balance cumulée (bornée à l'exercice actif)
+  const { clause, params } = await getExerciceDateFilter();
   const balanceRows = await db.runSelect(`
     SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
     FROM journal
+    ${clause ? `WHERE ${clause}` : ''}
     GROUP BY compte
     ORDER BY compte ASC
-  `);
+  `, params);
 
   const { bilan, resultat, comptesNonClasses } = computeEtatsFinanciers(balanceRows || []);
 

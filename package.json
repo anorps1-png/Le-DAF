@@ -12,7 +12,7 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "server": "node server/index.js",
+    "server": "node --max-old-space-size=4096 server/index.js",
     "electron": "electron .",
     "electron:dev": "vite build && electron .",
     "build:electron": "vite build && node build-installer.cjs",

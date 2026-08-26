@@ -381,11 +381,6 @@ async function initSchema() {
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_updated_at ON journal(updated_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_piece_id ON journal(piece_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_created_at ON journal(created_at)`);
-  // Sans cet index, chaque vérification "cette règle existe-t-elle déjà ?" dans
-  // learnFromJournalData (server/ai.js) fait un scan complet de business_rules — critique dès que
-  // l'apprentissage automatique s'exécute sur un gros import (des dizaines/centaines de milliers de
-  // motifs uniques à vérifier).
-  await run(`CREATE INDEX IF NOT EXISTS idx_business_rules_pattern ON business_rules(pattern)`);
 
   // Knowledge Docs Table
   await run(`CREATE TABLE IF NOT EXISTS knowledge_docs (
@@ -439,6 +434,12 @@ async function initSchema() {
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     synced_at DATETIME
   )`);
+
+  // Sans cet index, chaque vérification "cette règle existe-t-elle déjà ?" dans
+  // learnFromJournalData (server/ai.js) fait un scan complet de business_rules — critique dès que
+  // l'apprentissage automatique s'exécute sur un gros import (des dizaines/centaines de milliers de
+  // motifs uniques à vérifier).
+  await run(`CREATE INDEX IF NOT EXISTS idx_business_rules_pattern ON business_rules(pattern)`);
 
   await run(`CREATE TABLE IF NOT EXISTS sync_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

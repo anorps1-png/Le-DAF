@@ -3,10 +3,22 @@ import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, 
 import { getAccountLabel } from '../utils/ohadaPlan';
 import { fetchDirectSupabaseJournal, fetchDirectSupabaseTiers } from '../utils/supabaseClient';
 
-export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
+export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = {}) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'saisie');
+
+  // Changer d'exercice comptable force un remontage complet de ce module (voir App.jsx,
+  // moduleKey inclut l'exercice actif, nécessaire pour que toutes les données affichées se
+  // rafraîchissent). Sans ceci, ce remontage réinitialisait aussi l'onglet actif à 'saisie',
+  // faisant perdre silencieusement la vue Balance/Bilan/Résultat en cours : on répercute donc
+  // chaque changement d'onglet au parent (comptaInitialTab dans App.jsx) pour que le prochain
+  // remontage reparte du même onglet plutôt que du défaut.
+  useEffect(() => {
+    onTabChange && onTabChange(activeTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
   const [glComptes, setGlComptes] = useState([]);
   const [glSelectedCompte, setGlSelectedCompte] = useState(initialCompte || '');
+  const [glSelectedJournal, setGlSelectedJournal] = useState('');
   const [glLedger, setGlLedger] = useState(null);
   const [glLoading, setGlLoading] = useState(false);
   const [glError, setGlError] = useState('');
@@ -266,7 +278,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
     if (!glSelectedCompte || activeTab !== 'grandlivre') return;
     setGlLoading(true);
     setGlError('');
-    fetch(`/api/grand-livre/${encodeURIComponent(glSelectedCompte)}`)
+    const qs = glSelectedJournal ? `?journal=${encodeURIComponent(glSelectedJournal)}` : '';
+    fetch(`/api/grand-livre/${encodeURIComponent(glSelectedCompte)}${qs}`)
       .then(res => res.json())
       .then(data => {
         if (data.error) { setGlError(data.error); setGlLedger(null); }
@@ -274,7 +287,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
       })
       .catch(() => setGlError('Impossible de charger le Grand Livre. Vérifiez que le serveur est démarré.'))
       .finally(() => setGlLoading(false));
-  }, [glSelectedCompte, activeTab]);
+  }, [glSelectedCompte, glSelectedJournal, activeTab]);
 
   const openGrandLivre = (compte) => {
     setGlSelectedCompte(compte);
@@ -914,21 +927,38 @@ export const ComptabiliteModule = ({ initialTab, initialCompte } = {}) => {
       case 'grandlivre':
         return (
           <div>
-            <div style={{ marginBottom: '1.5rem', maxWidth: '480px' }}>
-              <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Compte</label>
-              <select
-                className="input"
-                style={{ padding: '0.5rem', width: '100%' }}
-                value={glSelectedCompte}
-                onChange={e => setGlSelectedCompte(e.target.value)}
-              >
-                {glComptes.length === 0 && <option value="">Aucun compte avec écritures</option>}
-                {glComptes.map(c => (
-                  <option key={c.compte} value={c.compte}>
-                    {c.compte} - {getAccountLabel(c.compte, customAccounts)}
-                  </option>
-                ))}
-              </select>
+            <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              <div style={{ maxWidth: '480px', flex: '1 1 320px' }}>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Compte</label>
+                <select
+                  className="input"
+                  style={{ padding: '0.5rem', width: '100%' }}
+                  value={glSelectedCompte}
+                  onChange={e => setGlSelectedCompte(e.target.value)}
+                >
+                  {glComptes.length === 0 && <option value="">Aucun compte avec écritures</option>}
+                  {glComptes.map(c => (
+                    <option key={c.compte} value={c.compte}>
+                      {c.compte} - {getAccountLabel(c.compte, customAccounts)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ maxWidth: '220px', flex: '1 1 160px' }}>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Journal</label>
+                <select
+                  className="input"
+                  style={{ padding: '0.5rem', width: '100%' }}
+                  value={glSelectedJournal}
+                  onChange={e => setGlSelectedJournal(e.target.value)}
+                  title="Filtrer les écritures de ce compte par code journal"
+                >
+                  <option value="">Tous les journaux</option>
+                  {journalCodes.map(code => (
+                    <option key={code} value={code}>{code}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {glLoading && <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Chargement du Grand Livre...</div>}

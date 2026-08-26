@@ -57,7 +57,10 @@ app.use((req, res, next) => {
     }
   })(req, res, next);
 });
-app.use(express.json());
+// Défaut Express (100kb) bien trop bas pour le chemin JSON de /api/import/auto-fix-and-import
+// avec un gros import (des centaines de milliers de lignes envoyées en JSON après équilibrage
+// côté client) — aligné sur la limite de taille de fichier ci-dessous.
+app.use(express.json({ limit: '1024mb' }));
 
 // Limite générale anti-abus sur toute l'API, et limite stricte sur les routes sensibles
 // (lecture/écriture de clés API, purge de la base, reconfiguration/déclenchement de la sync,
@@ -100,9 +103,12 @@ if (isVercelServer) {
 }
 
 const ALLOWED_UPLOAD_EXTENSIONS = new Set(['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt']);
+// Un modèle journal SYSCOHADA de plusieurs centaines de milliers de lignes (import comptable
+// annuel réel) dépasse largement une limite pensée pour des documents/factures isolés : 20 Mo
+// rejetait déjà un fichier de 250 000 lignes. Relevé pour couvrir jusqu'à ~1,5M lignes.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 Mo
+  limits: { fileSize: 1024 * 1024 * 1024 }, // 1 Go (mesuré : ~115 Mo pour 300k lignes réelles)
   fileFilter(req, file, cb) {
     const ext = (file.originalname.split('.').pop() || '').toLowerCase();
     if (!ALLOWED_UPLOAD_EXTENSIONS.has(ext)) {
@@ -464,6 +470,40 @@ async function dedupeJournalRows(rows) {
   return { rows: kept, duplicates };
 }
 
+// Insère de grands volumes d'écritures par lots (plutôt qu'une seule transaction géante pour
+// tout le fichier) : sur un import de plusieurs centaines de milliers à ~1,5M de lignes, une
+// transaction unique retient un verrou SQLite exclusif pendant toute sa durée (risque de
+// blocage des autres requêtes) et fait grossir le WAL démesurément avant le COMMIT final. Des
+// lots de 5000 lignes, chacun validé indépendamment, gardent un débit d'insertion élevé sans
+// ces deux inconvénients.
+function insertJournalRowsChunked(rows, batchSize = 5000) {
+  return new Promise((resolve, reject) => {
+    if (rows.length === 0) return resolve();
+    const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+    let i = 0;
+    const runNextBatch = () => {
+      if (i >= rows.length) {
+        stmt.finalize((err) => err ? reject(err) : resolve());
+        return;
+      }
+      const batch = rows.slice(i, i + batchSize);
+      i += batchSize;
+      db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        batch.forEach(r => {
+          stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
+        });
+        db.run("COMMIT", (err) => {
+          if (err) return reject(err);
+          setImmediate(runNextBatch);
+        });
+      });
+    };
+    runNextBatch();
+  });
+}
+
 app.post('/api/import', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier fourni' });
   const type = req.body.type; // 'tiers', 'journal'
@@ -560,42 +600,34 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
       const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
 
-      db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-        const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        dedupedRows.forEach(r => {
-          stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
-        });
-        stmt.finalize();
-        db.run("COMMIT", async (err) => {
-          if (err) {
-            console.error("COMMIT ERROR:", err);
-            res.status(500).json({ error: 'Erreur lors de la sauvegarde en base.' });
-          } else {
-            // Apprentissage automatique des règles depuis le journal importé (ML)
-            let learnedCount = 0;
-            try {
-              learnedCount = await learnFromJournalData(data, 2);
-            } catch (e) {
-              console.error("Erreur apprentissage ML:", e);
-            }
-            // Rafraîchit les statistiques du planificateur SQLite en tâche de fond (sans bloquer
-            // la réponse) : un gros import change significativement la distribution des données.
-            db.run('ANALYZE', () => {});
+      try {
+        await insertJournalRowsChunked(dedupedRows);
+      } catch (err) {
+        console.error("COMMIT ERROR:", err);
+        return res.status(500).json({ error: 'Erreur lors de la sauvegarde en base.' });
+      }
 
-            let msg = dedupedRows.length > 0
-              ? `${dedupedRows.length} écriture(s) importée(s) avec succès.`
-              : `Aucune nouvelle écriture importée.`;
-            if (duplicateCount > 0) {
-              msg += ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`;
-            }
-            if (learnedCount > 0) {
-              msg += ` 🧠 La Mémoire Métier a appris ${learnedCount} nouvelle(s) règle(s) d'imputation !`;
-            }
-            res.json({ success: true, message: msg });
-          }
-        });
-      });
+      // Apprentissage automatique des règles depuis le journal importé (ML)
+      let learnedCount = 0;
+      try {
+        learnedCount = await learnFromJournalData(data, 2);
+      } catch (e) {
+        console.error("Erreur apprentissage ML:", e);
+      }
+      // Rafraîchit les statistiques du planificateur SQLite en tâche de fond (sans bloquer
+      // la réponse) : un gros import change significativement la distribution des données.
+      db.run('ANALYZE', () => {});
+
+      let msg = dedupedRows.length > 0
+        ? `${dedupedRows.length} écriture(s) importée(s) avec succès.`
+        : `Aucune nouvelle écriture importée.`;
+      if (duplicateCount > 0) {
+        msg += ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`;
+      }
+      if (learnedCount > 0) {
+        msg += ` 🧠 La Mémoire Métier a appris ${learnedCount} nouvelle(s) règle(s) d'imputation !`;
+      }
+      res.json({ success: true, message: msg });
     } else if (type === 'factures') {
       // Saisie automatique d'écritures comptables depuis le modèle Excel de factures
       db.serialize(async () => {
@@ -971,34 +1003,26 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
     // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
     const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
 
-    db.serialize(() => {
-      db.run("BEGIN TRANSACTION");
-      const stmt = db.prepare("INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    try {
+      await insertJournalRowsChunked(dedupedRows);
+    } catch (err) {
+      return res.status(500).json({ error: 'Erreur d\'enregistrement en base.' });
+    }
 
-      dedupedRows.forEach(r => {
-        stmt.run(r.code_journal, r.poste_budgetaire, r.date, r.compte, r.compte_tiers, r.libelle, r.n_facture, r.reference, r.debit, r.credit);
-      });
-      stmt.finalize();
+    let learnedCount = 0;
+    try {
+      learnedCount = await learnFromJournalData(journalRows, 2);
+    } catch (e) {
+      console.error(e);
+    }
+    db.run('ANALYZE', () => {});
 
-      db.run("COMMIT", async (err) => {
-        if (err) return res.status(500).json({ error: 'Erreur d\'enregistrement en base.' });
-
-        let learnedCount = 0;
-        try {
-          learnedCount = await learnFromJournalData(journalRows, 2);
-        } catch (e) {
-          console.error(e);
-        }
-        db.run('ANALYZE', () => {});
-
-        let dedupMsg = duplicateCount > 0
-          ? ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`
-          : '';
-        res.json({
-          success: true,
-          message: `Correction & Importation réussies : ${dedupedRows.length} écriture(s) sauvegardée(s) !${balancingMessage}${dedupMsg}`
-        });
-      });
+    let dedupMsg = duplicateCount > 0
+      ? ` ${duplicateCount} écriture(s) ignorée(s) car déjà présente(s) en base (doublon détecté).`
+      : '';
+    res.json({
+      success: true,
+      message: `Correction & Importation réussies : ${dedupedRows.length} écriture(s) sauvegardée(s) !${balancingMessage}${dedupMsg}`
     });
   } catch (err) {
     console.error(err);
@@ -1191,20 +1215,26 @@ app.get('/api/grand-livre/comptes', async (req, res) => {
 app.get('/api/grand-livre/:compte', async (req, res) => {
   try {
     const { compte } = req.params;
+    const codeJournal = String(req.query.journal || '').trim();
+    // Restreint aussi le solde d'ouverture au même code journal, sinon un solde reporté qui
+    // mélange tous les journaux ne correspondrait plus aux lignes affichées, filtrées elles.
+    const journalFilter = codeJournal ? 'AND code_journal = ?' : '';
+    const journalParam = codeJournal ? [codeJournal] : [];
+
     const ex = await getActiveExercice();
     const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
     const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
 
     const [openingRows, rows] = await Promise.all([
       ex
-        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE compte = ? AND date < ?`, [compte, ex.date_debut])
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE compte = ? ${journalFilter} AND date < ?`, [compte, ...journalParam, ex.date_debut])
         : Promise.resolve([{ debit: 0, credit: 0 }]),
       db.runSelect(`
         SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
         FROM journal
-        WHERE compte = ? ${exFilter}
+        WHERE compte = ? ${journalFilter} ${exFilter}
         ORDER BY date ASC, created_at ASC, id ASC
-      `, [compte, ...exParams]),
+      `, [compte, ...journalParam, ...exParams]),
     ]);
 
     const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
@@ -1489,7 +1519,12 @@ async function getFinancialRows() {
   try {
     const supabase = await getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase.from('journal').select('compte, debit, credit');
+      const ex = await getActiveExercice();
+      let query = supabase.from('journal').select('compte, debit, credit');
+      if (ex) {
+        query = query.gte('date', ex.date_debut).lte('date', ex.date_fin);
+      }
+      const { data, error } = await query;
       if (!error && Array.isArray(data) && data.length > 0) {
         const accMap = {};
         data.forEach(r => {
@@ -1964,7 +1999,11 @@ app.get('/api/export/etats-financiers', async (req, res) => {
         const journalRowsAll = journalRows || [];
         const truncated = journalRowsAll.length > PDF_JOURNAL_MAX_ROWS;
 
-        journalRowsAll.slice(0, PDF_JOURNAL_MAX_ROWS).forEach(r => {
+        // r.id est un UUID interne (clé de synchronisation) depuis la migration multi-machines :
+        // le rendu brut débordait largement de la colonne (45pt prévus pour un numéro, pas 36
+        // caractères), décalant toutes les colonnes suivantes. Un numéro de ligne séquentiel est
+        // à la fois lisible et ce que l'utilisateur attend d'une colonne "ID" imprimée.
+        journalRowsAll.slice(0, PDF_JOURNAL_MAX_ROWS).forEach((r, idx) => {
           if (checkPageBreak(20)) {
             y = doc.y;
             drawJournalHeader(y);
@@ -1974,7 +2013,7 @@ app.get('/api/export/etats-financiers', async (req, res) => {
           doc.fillColor('#1e293b').fontSize(7.5).font('Helvetica');
 
           let x = 30;
-          doc.text(String(r.id), x + 3, y + 4, { width: jColWidths[0] - 6, align: 'left' }); x += jColWidths[0];
+          doc.text(String(idx + 1), x + 3, y + 4, { width: jColWidths[0] - 6, align: 'left' }); x += jColWidths[0];
           doc.text(String(r.date || ''), x + 3, y + 4, { width: jColWidths[1] - 6, align: 'left' }); x += jColWidths[1];
           doc.text(String(r.code_journal || ''), x + 3, y + 4, { width: jColWidths[2] - 6, align: 'left' }); x += jColWidths[2];
           doc.text(String(r.poste_budgetaire || '').substring(0, 10), x + 3, y + 4, { width: jColWidths[3] - 6, align: 'left' }); x += jColWidths[3];
@@ -2192,13 +2231,16 @@ app.get('/api/export/etats-financiers', async (req, res) => {
         ["ID", "Date", "Code Journal", "Budget", "N° Compte", "Compte Tiers", "Libellé écriture", "N° Facture", "Référence", "Débit", "Crédit"]
       ];
       let journalSumDebit = 0, journalSumCredit = 0;
-      journalRows.forEach(r => {
+      // r.id est un UUID interne (clé de synchronisation) depuis la migration multi-machines,
+      // illisible et sans valeur pour un export destiné à être lu/imprimé : un numéro de ligne
+      // séquentiel généré ici est ce que l'utilisateur attend d'une colonne "ID" sur ce document.
+      journalRows.forEach((r, idx) => {
         const debit = r.debit || 0;
         const credit = r.credit || 0;
         journalSumDebit += debit;
         journalSumCredit += credit;
         journalAoa.push([
-          r.id,
+          idx + 1,
           r.date,
           r.code_journal,
           r.poste_budgetaire,
@@ -3210,10 +3252,16 @@ app.use((err, req, res, next) => {
 if (!process.env.VERCEL && !process.env.NOW_BUILDER && !process.env.VERCEL_ENV) {
   const PORT = process.env.PORT || 3003;
   const HOST = process.env.HOST || '127.0.0.1';
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`Backend server running on http://${HOST}:${PORT}`);
     startAutoSyncCron();
   });
+  // Un import de plusieurs centaines de milliers à ~1,5M de lignes (parsing + upsert par lots)
+  // peut légitimement prendre plusieurs minutes : les timeouts par défaut de Node couperaient
+  // la requête avant la fin.
+  server.requestTimeout = 0;
+  server.headersTimeout = 60000;
+  server.timeout = 0;
 }
 
 module.exports = app;

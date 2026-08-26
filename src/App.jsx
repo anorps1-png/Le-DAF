@@ -590,7 +590,7 @@ function App() {
     switch (activeModule) {
       case 'dashboard': return <Dashboard key={moduleKey} />;
       case 'ia': return <ChatbotIA />;
-      case 'saisie': return <ComptabiliteModule key={moduleKey} initialTab={comptaInitialTab} />;
+      case 'saisie': return <ComptabiliteModule key={moduleKey} initialTab={comptaInitialTab} onTabChange={setComptaInitialTab} />;
       case 'tiers': return <TiersModule key={moduleKey} />;
       case 'treso': return <TresoModule key={moduleKey} />;
       case 'fiscalite': return <FiscaliteModule key={moduleKey} onNavigate={navigateTo} />;
