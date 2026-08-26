@@ -37,11 +37,13 @@ async function getFinancialContext() {
       const id = settingsRows[0] && settingsRows[0].value;
       let exFilter = "";
       let exParams = [];
+      let exercice = null;
       if (id) {
-        const exRows = await db.runSelect("SELECT date_debut, date_fin FROM exercices WHERE id = ?", [id]);
+        const exRows = await db.runSelect("SELECT libelle, date_debut, date_fin FROM exercices WHERE id = ?", [id]);
         if (exRows[0]) {
           exFilter = "WHERE date >= ? AND date <= ?";
           exParams = [exRows[0].date_debut, exRows[0].date_fin];
+          exercice = exRows[0];
         }
       }
 
@@ -59,11 +61,23 @@ async function getFinancialContext() {
       `;
       const tiers = await db.runSelect(tiersQuery, exParams);
       const journal = await db.runSelect(`SELECT * FROM journal ${exFilter} ORDER BY date DESC, created_at DESC, id DESC LIMIT 500`, exParams);
-      resolve({ tiers, journal });
+      resolve({ tiers, journal, exercice });
     } catch (err) {
       reject(err);
     }
   });
+}
+
+// Le Cerveau IA ne doit jamais proposer de modification (INSERT/UPDATE/DELETE) portant sur une
+// écriture en dehors de l'exercice actuellement ouvert : le serveur (`/api/audit/apply`) rejette de
+// toute façon l'action après coup, mais lui donner la borne exacte évite de lui faire perdre un
+// aller-retour à proposer une requête vouée à l'échec, et lui permet d'expliquer la limite à
+// l'utilisateur plutôt que de simplement échouer.
+function buildExerciceRule(exercice) {
+  if (exercice) {
+    return `RÈGLE ABSOLUE - EXERCICE OUVERT : l'exercice actuellement ouvert est "${exercice.libelle}" (du ${exercice.date_debut} au ${exercice.date_fin}). Toute requête SQL de modification que tu proposes (INSERT/UPDATE/DELETE sur 'journal') doit porter exclusivement sur des écritures dont la date est comprise dans cet intervalle. Ne propose jamais de créer, modifier ou supprimer une écriture datée en dehors de cet exercice, même si l'utilisateur le demande explicitement : le serveur refusera la requête. Si l'action demandée concerne un autre exercice, explique-le à l'utilisateur au lieu de proposer une requête.`;
+  }
+  return `RÈGLE ABSOLUE - AUCUN EXERCICE OUVERT : aucun exercice comptable n'est actuellement sélectionné dans l'application. Tu ne peux proposer AUCUNE modification (INSERT/UPDATE/DELETE) tant qu'un exercice n'est pas ouvert : informes-en l'utilisateur au lieu de proposer une requête.`;
 }
 
 async function getBusinessMemoryContext() {
@@ -392,32 +406,54 @@ async function learnFromJournalData(entries, minOccurrencesForNewRule = 1) {
   return learnedCount;
 }
 
+// Certains modèles (surtout via des proxys tiers qui n'implémentent pas correctement le
+// function-calling OpenAI, cf. OPENAI_BASE_URL personnalisée) ne renvoient jamais de vrais
+// `tool_calls` : ils répondent en texte brut, parfois SANS les balises ```proposal/```json
+// attendues, et il arrive qu'ils répètent le même bloc JSON plusieurs fois dans une seule
+// réponse (dégénérescence connue de certains LLM). Sans nettoyage robuste, l'utilisateur voit du
+// JSON brut dupliqué au lieu d'une explication claire + d'un bouton d'approbation. On détecte donc
+// aussi bien les blocs balisés que les objets JSON nus contenant "sql", et on retire TOUTES les
+// occurrences trouvées du texte affiché (pas seulement la première), en ne gardant que la
+// première comme proposition réelle.
 function extractProposalFromText(rawText) {
   if (!rawText || typeof rawText !== 'string') return { text: rawText, proposal: null };
 
-  const proposalRegex = /```(?:proposal|json)?\s*(\{[\s\S]*?"sql"\s*:\s*[\s\S]*?\})\s*```/i;
-  const match = rawText.match(proposalRegex);
-  if (match) {
-    try {
-      const parsed = JSON.parse(match[1]);
-      if (parsed && parsed.sql) {
-        let cleanSql = String(parsed.sql).trim();
-        cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
-        cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
-        cleanSql = cleanSql.replace(/;\s*$/, '').trim();
+  const blockRegex = /```(?:proposal|json)?\s*(\{[\s\S]*?"sql"\s*:\s*[\s\S]*?\})\s*```|(\{(?:[^{}]|\{[^{}]*\})*"sql"\s*:\s*"(?:[^"\\]|\\.)*"(?:[^{}]|\{[^{}]*\})*\})/gi;
 
-        const cleanText = rawText.replace(match[0], '').trim();
-        return {
-          text: cleanText || "J'ai formulé la proposition suivante pour validation et exécution :",
-          proposal: {
+  let proposal = null;
+  const snippets = [];
+  let match;
+  while ((match = blockRegex.exec(rawText)) !== null) {
+    const jsonStr = match[1] || match[2];
+    if (!jsonStr) continue;
+    snippets.push(match[0]);
+    if (!proposal) {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (parsed && parsed.sql) {
+          let cleanSql = String(parsed.sql).trim();
+          cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
+          cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
+          cleanSql = cleanSql.replace(/;\s*$/, '').trim();
+          proposal = {
             sql: cleanSql,
             reason: parsed.reason || "Action comptable / financière proposée par l'IA"
-          }
-        };
+          };
+        }
+      } catch (e) {
+        // Bloc non parsable (JSON invalide/tronqué) : ignoré, on continue de chercher.
       }
-    } catch (e) {
-      // Ignorer si parsing échoue
     }
+  }
+
+  if (proposal) {
+    let cleanText = rawText;
+    snippets.forEach(snippet => { cleanText = cleanText.split(snippet).join(''); });
+    cleanText = cleanText.trim();
+    return {
+      text: cleanText || "J'ai formulé la proposition suivante pour validation et exécution :",
+      proposal
+    };
   }
 
   return { text: rawText, proposal: null };
@@ -438,6 +474,8 @@ Structure de nos livres et données comptables :
 - Tables accessibles : 'journal', 'tiers', 'chart_of_accounts', 'business_rules', 'fiscal_echeances', 'exercices', 'statement_lines'.
 
 ${memoryContext}
+
+${buildExerciceRule(context.exercice)}
 
 Consignes & Règle d'or de sécurité :
 1. Tu as le pouvoir de concevoir toute action comptable : passer des écritures complètes en partie double (Débit/Crédit), corriger des comptes, lettrer des factures, créer des tiers, ajuster la trésorerie.
@@ -481,6 +519,13 @@ Consignes & Règle d'or de sécurité :
 
     const openai = new OpenAI({ apiKey, baseURL });
 
+    const activeExSettingRows = await db.runSelect("SELECT value FROM settings WHERE key = 'SELECTED_EXERCICE_ID'");
+    const activeExId = activeExSettingRows[0] && activeExSettingRows[0].value;
+    const activeExRows = activeExId
+      ? await db.runSelect("SELECT libelle, date_debut, date_fin FROM exercices WHERE id = ?", [activeExId])
+      : [];
+    const activeExercice = activeExRows[0] || null;
+
     const systemPrompt = `Tu es le DAF Principal et Expert-Comptable OHADA / SYSCOHADA de l'entreprise.
 Tu as TOUS LES POUVOIRS d'analyse, d'audit, de pilotage financier, de saisie et de correction sur l'ensemble de la base comptable.
 
@@ -495,11 +540,14 @@ Structure complète de la base de données :
 
 ${memoryContext}
 
+${buildExerciceRule(activeExercice)}
+
 Instructions :
 - Règle N°1 : Rédige dès le premier coup des requêtes SQL ciblées et agrégées (SUM, COUNT, GROUP BY, WHERE précis) pour limiter les étapes et économiser les tokens.
 - Règle N°2 : Tu as le pouvoir de proposer TOUTE modification, saisie en partie double, lettrage, rééquilibrage ou correction via l'outil 'propose_update'. L'utilisateur devra obligatoirement l'approuver avant son exécution en base.
 - Règle N°3 : Pour les écritures en partie double (Débit + Crédit), inclus plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
-- Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.`;
+- Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.
+- Règle N°5 : L'outil 'propose_update' ne doit JAMAIS être utilisé pour une écriture datée en dehors de l'exercice ouvert précisé ci-dessus (le serveur la refuserait de toute façon) — dans ce cas, explique la limite à l'utilisateur au lieu d'appeler l'outil.`;
 
     const tools = [
       {
@@ -792,8 +840,15 @@ Instructions :
 
 async function askAuditAI(anomalyContext) {
   const settings = await getSettings();
-  
-  const systemPrompt = `Tu es le DAF et Expert Comptable OHADA de l'entreprise. 
+
+  const auditExSettingRows = await db.runSelect("SELECT value FROM settings WHERE key = 'SELECTED_EXERCICE_ID'");
+  const auditExId = auditExSettingRows[0] && auditExSettingRows[0].value;
+  const auditExRows = auditExId
+    ? await db.runSelect("SELECT libelle, date_debut, date_fin FROM exercices WHERE id = ?", [auditExId])
+    : [];
+  const auditActiveExercice = auditExRows[0] || null;
+
+  const systemPrompt = `Tu es le DAF et Expert Comptable OHADA de l'entreprise.
 Tu agis en tant qu'Auditeur. Voici une anomalie détectée dans notre journal comptable :
 ${JSON.stringify(anomalyContext)}
 
@@ -801,6 +856,9 @@ Ta mission :
 1. Analyser brièvement le problème et donner la règle OHADA applicable.
 2. Proposer une requête SQL de type "UPDATE" pour corriger le problème dans la table SQLite "journal".
 IMPORTANT: La table journal a les colonnes suivantes : id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit.
+
+${buildExerciceRule(auditActiveExercice)}
+Si l'écriture concernée par l'anomalie est datée en dehors de cet exercice, ne propose aucun SQL : indique-le dans "analyse" à la place.
 
 Tu DOIS impérativement répondre UNIQUEMENT avec un objet JSON valide ayant la structure suivante, et rien d'autre (pas de markdown \`\`\`json) :
 {

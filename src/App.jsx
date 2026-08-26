@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -206,32 +206,13 @@ const defaultWelcomeMessage = [
   { role: 'assistant', text: "Bonjour ! Je suis votre Agent Comptable OHADA 🤖.\n\nJe suis prêt à analyser vos comptes, lettrer vos factures, rapprocher vos banques et préparer vos déclarations fiscales. Que souhaitez-vous faire aujourd'hui ?" }
 ];
 
-const ChatbotIA = () => {
-  const [messages, setMessages] = useState(() => {
-    try {
-      const saved = localStorage.getItem('agent_ohada_chat_history');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.error("Error reading chat history:", e);
-    }
-    return defaultWelcomeMessage;
-  });
-
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+// `messages`/`input`/`loading` sont levés dans App() (voir plus bas) et passés en props : App ne
+// démonte jamais, contrairement à ce composant qui disparaît dès qu'on change de module dans la
+// sidebar. Sans ça, une réponse IA qui arrive après que l'utilisateur a changé de page se heurtait
+// à un setState sur un composant démonté (no-op silencieux) et était perdue.
+const ChatbotIA = ({ messages, setMessages, input, setInput, loading, setLoading }) => {
   const messagesEndRef = useRef(null);
   const chatInputRef = useRef(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('agent_ohada_chat_history', JSON.stringify(messages));
-    } catch (e) {
-      console.error("Error saving chat history:", e);
-    }
-  }, [messages]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -571,14 +552,56 @@ const Dashboard = () => {
 function App() {
   const [activeModule, setActiveModule] = useState('ia');
   const [activeExerciceId, setActiveExerciceId] = useState(null);
+  // État du chat Cerveau IA, levé ici (plutôt que local à ChatbotIA) pour qu'il survive à un
+  // changement de module pendant qu'une réponse est encore en cours de chargement.
+  const [chatMessages, setChatMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem('agent_ohada_chat_history');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      console.error("Error reading chat history:", e);
+    }
+    return defaultWelcomeMessage;
+  });
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('agent_ohada_chat_history', JSON.stringify(chatMessages));
+    } catch (e) {
+      console.error("Error saving chat history:", e);
+    }
+  }, [chatMessages]);
   // État levé pour la navigation croisée entre modules (ex: un lien "Voir le Bilan" ou "Grand
   // Livre" depuis la Fiscalité, qui doit arriver sur le bon onglet de Compta & États Financiers) —
   // évite de dupliquer ces vues, chaque module reste la seule source de vérité pour son affichage.
   const [comptaInitialTab, setComptaInitialTab] = useState(null);
+  // Pile de navigation pour le bouton "Retour" : mémorise, à chaque changement de page, la page
+  // quittée (et son onglet Compta courant s'il s'agit de "saisie") pour pouvoir y revenir à
+  // l'identique — sans ça, un lien croisé (ex: Fiscalité -> Bilan) est un aller simple, l'utilisateur
+  // doit recliquer manuellement dans la sidebar pour revenir là où il était.
+  const [navHistory, setNavHistory] = useState([]);
 
   const navigateTo = (moduleId, opts = {}) => {
+    if (moduleId !== activeModule) {
+      setNavHistory(h => [...h, { moduleId: activeModule, tab: activeModule === 'saisie' ? comptaInitialTab : null }]);
+    }
     if (opts.tab !== undefined) setComptaInitialTab(opts.tab);
     setActiveModule(moduleId);
+  };
+
+  const goBack = () => {
+    setNavHistory(h => {
+      if (h.length === 0) return h;
+      const prev = h[h.length - 1];
+      setComptaInitialTab(prev.tab);
+      setActiveModule(prev.moduleId);
+      return h.slice(0, -1);
+    });
   };
 
   // Changer d'exercice ne fait pas redescendre de dates dans les modules : ils continuent
@@ -589,7 +612,11 @@ function App() {
   const renderContent = () => {
     switch (activeModule) {
       case 'dashboard': return <Dashboard key={moduleKey} />;
-      case 'ia': return <ChatbotIA />;
+      case 'ia': return <ChatbotIA
+        messages={chatMessages} setMessages={setChatMessages}
+        input={chatInput} setInput={setChatInput}
+        loading={chatLoading} setLoading={setChatLoading}
+      />;
       case 'saisie': return <ComptabiliteModule key={moduleKey} initialTab={comptaInitialTab} onTabChange={setComptaInitialTab} />;
       case 'tiers': return <TiersModule key={moduleKey} />;
       case 'treso': return <TresoModule key={moduleKey} />;
@@ -634,19 +661,30 @@ function App() {
         
         <nav className="sidebar-nav">
           {navItems.map(item => (
-            <button 
+            <button
               key={item.id}
               className={`nav-item ${activeModule === item.id ? 'active' : ''}`}
-              onClick={() => setActiveModule(item.id)}
+              onClick={() => navigateTo(item.id)}
+              style={{ position: 'relative' }}
             >
               {item.icon}
               {item.label}
+              {item.id === 'ia' && chatLoading && activeModule !== 'ia' && (
+                <span
+                  title="Le Cerveau IA analyse toujours en arrière-plan"
+                  style={{
+                    position: 'absolute', right: '0.9rem', top: '50%', transform: 'translateY(-50%)',
+                    width: '8px', height: '8px', borderRadius: '50%',
+                    background: 'var(--color-primary)', animation: 'pulse 1.4s ease-in-out infinite'
+                  }}
+                />
+              )}
             </button>
           ))}
         </nav>
         
         <div className="sidebar-footer">
-          <button className={`nav-item ${activeModule === 'settings' ? 'active' : ''}`} onClick={() => setActiveModule('settings')}>
+          <button className={`nav-item ${activeModule === 'settings' ? 'active' : ''}`} onClick={() => navigateTo('settings')}>
             <Settings className="nav-icon" />
             Paramétrage IA
           </button>
@@ -656,13 +694,23 @@ function App() {
       {/* Main Content */}
       <main className="main-content">
         <header className="header">
-          <div className="header-title">
+          <div className="header-title" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            {navHistory.length > 0 && (
+              <button
+                className="btn btn-secondary"
+                onClick={goBack}
+                title="Retour à la page précédente"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.4rem 0.7rem', fontSize: '0.8rem' }}
+              >
+                <ArrowLeft size={16} /> Retour
+              </button>
+            )}
             {navItems.find(i => i.id === activeModule)?.label || 'Paramètres'}
           </div>
-          
+
           <div className="header-actions">
             <ExerciceSelector onChange={setActiveExerciceId} />
-            <SyncHeaderStatus onClickSettings={() => setActiveModule('settings')} />
+            <SyncHeaderStatus onClickSettings={() => navigateTo('settings')} />
 
             <div className="search-bar" style={{ position: 'relative' }}>
               <Search size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }} />

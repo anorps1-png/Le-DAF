@@ -151,15 +151,22 @@ async function getExerciceDateFilter() {
 // simplement de la Balance et du Grand Livre dès qu'un exercice était actif, alors que son solde
 // reste réel. Sans exercice actif, solde antérieur = 0 pour tous les comptes (rien à reporter) :
 // le comportement est alors strictement identique à l'ancien calcul.
-async function getBalanceRows() {
-  const ex = await getActiveExercice();
+async function getBalanceRows(dateDebutOverride, dateFinOverride) {
+  // Des dates explicites (filtre manuel côté Balance) priment sur les bornes de l'exercice actif,
+  // mais seulement si les DEUX sont fournies ensemble — sans ça (une seule date, ou aucune),
+  // comportement inchangé (bornes de l'exercice actif, ou aucune restriction si aucun exercice
+  // n'est sélectionné).
+  const hasOverride = !!(dateDebutOverride && dateFinOverride);
+  const ex = hasOverride ? null : await getActiveExercice();
+  const dateDebut = hasOverride ? dateDebutOverride : (ex && ex.date_debut);
+  const dateFin = hasOverride ? dateFinOverride : (ex && ex.date_fin);
 
   const [openingRows, periodRows, allTimeLabels] = await Promise.all([
-    ex
-      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date < ? GROUP BY compte`, [ex.date_debut])
+    dateDebut
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date < ? GROUP BY compte`, [dateDebut])
       : Promise.resolve([]),
-    ex
-      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? GROUP BY compte`, [ex.date_debut, ex.date_fin])
+    (dateDebut && dateFin)
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? GROUP BY compte`, [dateDebut, dateFin])
       : db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal GROUP BY compte`),
     db.runSelect(`SELECT compte, MAX(libelle) as intitule FROM journal GROUP BY compte`),
   ]);
@@ -332,23 +339,61 @@ function normalizeDate(value) {
   return str;
 }
 
-// Génère automatiquement les contreparties de trésorerie (Caisse 571100 ou Banque 521100)
-// pour toute opération importée sur journal Caisse (CAISPR, CA) ou Banque (BQ, BANQUE, etc.)
-// quel que soit le sens (règlement au débit ou encaissement au crédit d'un tiers/compte).
-function expandTreasuryCounterparts(rows) {
+// Apprend, à partir de l'historique déjà en base, le compte de trésorerie réellement associé à
+// chaque code journal (ex: BQ2 -> 52110017, CAISPR -> 57111001...) : un cabinet a en pratique
+// plusieurs comptes bancaires/caisses distincts, chacun avec son propre code journal, pas un seul
+// compte générique "Banque"/"Caisse" pour tout le monde. Le compte majoritaire (celui qui revient
+// le plus souvent pour ce code) est retenu comme correspondance canonique.
+async function getJournalCompteMap() {
+  const rows = await db.runSelect(`
+    SELECT code_journal, compte, COUNT(*) as n
+    FROM journal
+    WHERE compte LIKE '52%' OR compte LIKE '57%'
+    GROUP BY code_journal, compte
+    ORDER BY code_journal, n DESC
+  `);
+  const map = new Map();
+  rows.forEach(r => {
+    if (!map.has(r.code_journal)) map.set(r.code_journal, r.compte);
+  });
+  return map;
+}
+
+// Génère automatiquement les contreparties de trésorerie pour toute opération importée sur un
+// journal Caisse (CAISPR, CA...) ou Banque (BQ, BANQUE, etc.), quel que soit le sens (règlement au
+// débit ou encaissement au crédit d'un tiers/compte). Le compte de contrepartie utilisé est celui
+// appris pour CE code journal précis (journalCompteMap, voir getJournalCompteMap ci-dessus) — un
+// compte générique (571100 Caisse / 521100 Banque) ne sert que de repli pour un code jamais vu.
+function expandTreasuryCounterparts(rows, journalCompteMap = new Map()) {
   const result = [];
   rows.forEach((r, i) => {
     result.push(r);
-    
+
+    // La classification "est-ce un journal de trésorerie ?" reste basée uniquement sur le nom
+    // (regex) : un journal qui ne touche qu'OCCASIONNELLEMENT un compte 52x/57x (ex: une
+    // régularisation ponctuelle sur un journal "OD") ne doit pas être traité comme un journal de
+    // trésorerie à part entière pour autant. journalCompteMap ne sert qu'à choisir le BON compte
+    // une fois qu'on sait déjà, par le nom, que c'est un journal de trésorerie.
+    const knownCompte = journalCompteMap.get(r.code_journal);
     const isCaisseJournal = /CAIS|CA/i.test(r.code_journal);
-    const isBanqueJournal = /BANQ|BQ|BNQ|BNC|SGBC|UBA|ECOR/i.test(r.code_journal);
+    const isBanqueJournal = !isCaisseJournal && /BANQ|BQ|BNQ|BNC|SGBC|UBA|ECOR/i.test(r.code_journal);
 
     if (!isCaisseJournal && !isBanqueJournal) return;
+
+    // N'utiliser le compte appris que s'il est bien de la bonne classe (57x pour Caisse, 52x pour
+    // Banque) : un historique incohérent ne doit jamais faire remonter un compte du mauvais type.
+    const knownCompte57 = (knownCompte && /^57/.test(knownCompte)) ? knownCompte : null;
+    const knownCompte52 = (knownCompte && /^52/.test(knownCompte)) ? knownCompte : null;
 
     const prevRow = rows[i - 1];
     const nextRow = rows[i + 1];
 
     if (isCaisseJournal) {
+      // Une ligne qui est déjà elle-même sur un compte 57x (la contrepartie caisse elle-même,
+      // fournie explicitement dans le fichier source) n'a par définition pas besoin de sa propre
+      // contrepartie : sans ce garde-fou, cette ligne se voyait attribuer une contrepartie
+      // supplémentaire en trop dès que SES voisines n'étaient pas elles-mêmes en 57x.
+      if (/^57/.test(r.compte)) return;
       const prevIs57 = prevRow && /^57/.test(prevRow.compte);
       const nextIs57 = nextRow && /^57/.test(nextRow.compte);
 
@@ -358,7 +403,7 @@ function expandTreasuryCounterparts(rows) {
             code_journal: r.code_journal,
             poste_budgetaire: r.poste_budgetaire || 'CAISSE',
             date: r.date,
-            compte: '571100',
+            compte: knownCompte57 || '571100',
             compte_tiers: r.compte_tiers,
             libelle: `Règlement Caisse (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
             n_facture: r.n_facture,
@@ -371,7 +416,7 @@ function expandTreasuryCounterparts(rows) {
             code_journal: r.code_journal,
             poste_budgetaire: r.poste_budgetaire || 'CAISSE',
             date: r.date,
-            compte: '571100',
+            compte: knownCompte57 || '571100',
             compte_tiers: r.compte_tiers,
             libelle: `Encaissement Caisse (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
             n_facture: r.n_facture,
@@ -382,6 +427,9 @@ function expandTreasuryCounterparts(rows) {
         }
       }
     } else if (isBanqueJournal) {
+      // Même garde-fou côté Banque : une ligne déjà sur un compte 52x est elle-même la
+      // contrepartie, elle n'en génère pas une autre.
+      if (/^52/.test(r.compte)) return;
       const prevIs52 = prevRow && /^52/.test(prevRow.compte);
       const nextIs52 = nextRow && /^52/.test(nextRow.compte);
 
@@ -391,7 +439,7 @@ function expandTreasuryCounterparts(rows) {
             code_journal: r.code_journal,
             poste_budgetaire: r.poste_budgetaire || 'BANQUE',
             date: r.date,
-            compte: '521100',
+            compte: knownCompte52 || '521100',
             compte_tiers: r.compte_tiers,
             libelle: `Règlement Banque (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
             n_facture: r.n_facture,
@@ -404,7 +452,7 @@ function expandTreasuryCounterparts(rows) {
             code_journal: r.code_journal,
             poste_budgetaire: r.poste_budgetaire || 'BANQUE',
             date: r.date,
-            compte: '521100',
+            compte: knownCompte52 || '521100',
             compte_tiers: r.compte_tiers,
             libelle: `Encaissement Banque (${r.compte_tiers || 'Tiers'}) - ${r.libelle}`,
             n_facture: r.n_facture,
@@ -556,8 +604,10 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
           }
       });
 
-      // Génération automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
-      const finalRows = expandTreasuryCounterparts(journalRows);
+      // Génération automatique des contreparties de trésorerie, sur le compte réellement associé à
+      // chaque code journal (appris depuis l'historique déjà en base — voir getJournalCompteMap).
+      const journalCompteMap = await getJournalCompteMap();
+      const finalRows = expandTreasuryCounterparts(journalRows, journalCompteMap);
 
       // Un fichier journal complet doit rester équilibré dans son ensemble.
       const totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
@@ -966,8 +1016,10 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
       return res.status(400).json({ error: 'Aucun fichier ni écriture fournie.' });
     }
 
-    // Expansion automatique des contreparties de trésorerie (Caisse 571100 ou Banque 521100)
-    const finalRows = expandTreasuryCounterparts(journalRows);
+    // Expansion automatique des contreparties de trésorerie, sur le compte réellement associé à
+    // chaque code journal (appris depuis l'historique déjà en base — voir getJournalCompteMap).
+    const journalCompteMap = await getJournalCompteMap();
+    const finalRows = expandTreasuryCounterparts(journalRows, journalCompteMap);
 
     totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
     totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
@@ -1180,6 +1232,40 @@ app.put('/api/journal/:id', async (req, res) => {
   }
 });
 
+// Changement de compte en masse depuis le Grand Livre : permet de corriger plusieurs écritures
+// mal imputées d'un coup (sélection multiple), sans avoir à rouvrir chacune dans le Journal.
+// Même logique que PUT /api/journal/:id ci-dessus, mais sur un lot d'ids.
+app.patch('/api/journal/bulk-compte', async (req, res) => {
+  try {
+    const { ids, compte } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'Aucune écriture sélectionnée.' });
+    }
+    if (!compte || !String(compte).trim()) {
+      return res.status(400).json({ error: 'Compte obligatoire.' });
+    }
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await db.runUpdate(
+      `UPDATE journal SET compte=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id IN (${placeholders})`,
+      [compte, ...ids]
+    );
+
+    try {
+      const updatedRows = await db.runSelect(
+        `SELECT libelle, compte, code_journal, compte_tiers FROM journal WHERE id IN (${placeholders})`,
+        ids
+      );
+      await learnFromJournalData(updatedRows);
+    } catch (e) {
+      console.error('Erreur apprentissage ML après modification en masse:', e);
+    }
+
+    res.json({ success: true, changes: result.changes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/journal/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1214,14 +1300,13 @@ app.get('/api/grand-livre/comptes', async (req, res) => {
 // d'ouverture reporté des exercices antérieurs + SUM des lignes précédentes du même compte dans
 // la période) — c'est la définition même d'un Grand Livre. Sans ce report, le solde progressif
 // repartait de zéro à chaque changement d'exercice, ce qui ne reflète pas le solde réel du compte.
+// Le Grand Livre par compte et le Grand Livre par journal (ci-dessous) sont deux axes de
+// consultation totalement indépendants et mutuellement exclusifs (voir ComptabiliteModule.jsx,
+// glFilterMode) : sélectionner un compte affiche TOUJOURS l'intégralité de ses écritures, tous
+// journaux confondus, quel que soit le journal sélectionné par ailleurs à l'écran.
 app.get('/api/grand-livre/:compte', async (req, res) => {
   try {
     const { compte } = req.params;
-    const codeJournal = String(req.query.journal || '').trim();
-    // Restreint aussi le solde d'ouverture au même code journal, sinon un solde reporté qui
-    // mélange tous les journaux ne correspondrait plus aux lignes affichées, filtrées elles.
-    const journalFilter = codeJournal ? 'AND code_journal = ?' : '';
-    const journalParam = codeJournal ? [codeJournal] : [];
 
     const ex = await getActiveExercice();
     const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
@@ -1229,14 +1314,14 @@ app.get('/api/grand-livre/:compte', async (req, res) => {
 
     const [openingRows, rows] = await Promise.all([
       ex
-        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE compte = ? ${journalFilter} AND date < ?`, [compte, ...journalParam, ex.date_debut])
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE compte = ? AND date < ?`, [compte, ex.date_debut])
         : Promise.resolve([{ debit: 0, credit: 0 }]),
       db.runSelect(`
         SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
         FROM journal
-        WHERE compte = ? ${journalFilter} ${exFilter}
+        WHERE compte = ? ${exFilter}
         ORDER BY date ASC, created_at ASC, id ASC
-      `, [compte, ...journalParam, ...exParams]),
+      `, [compte, ...exParams]),
     ]);
 
     const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
@@ -1248,6 +1333,33 @@ app.get('/api/grand-livre/:compte', async (req, res) => {
     });
 
     res.json({ compte, solde_ouverture: soldeOuverture, lignes, solde_final: solde });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Vue "par journal" : toutes les écritures d'un code journal donné, tous comptes confondus —
+// contrairement au Grand Livre par compte, il n'y a pas de solde progressif unique qui aurait un
+// sens ici (des comptes de nature différente s'y mélangent), donc on renvoie chaque ligne avec son
+// compte et seulement les totaux Débit/Crédit du journal sur la période.
+app.get('/api/grand-livre/par-journal/:codeJournal', async (req, res) => {
+  try {
+    const { codeJournal } = req.params;
+    const ex = await getActiveExercice();
+    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
+    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
+
+    const lignes = await db.runSelect(`
+      SELECT id, date, code_journal, compte, compte_tiers, n_facture, reference, libelle, debit, credit
+      FROM journal
+      WHERE code_journal = ? ${exFilter}
+      ORDER BY date ASC, created_at ASC, id ASC
+    `, [codeJournal, ...exParams]);
+
+    const totalDebit = lignes.reduce((s, l) => s + (l.debit || 0), 0);
+    const totalCredit = lignes.reduce((s, l) => s + (l.credit || 0), 0);
+
+    res.json({ code_journal: codeJournal, lignes, total_debit: totalDebit, total_credit: totalCredit });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1625,7 +1737,7 @@ app.get('/api/financial-analysis', async (req, res) => {
 // --- FINANCIAL STATEMENTS (ÉTATS FINANCIERS) ---
 app.get('/api/balance', async (req, res) => {
   try {
-    const rows = await getBalanceRows();
+    const rows = await getBalanceRows(req.query.dateDebut, req.query.dateFin);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1753,6 +1865,15 @@ app.get('/api/export/etats-financiers', async (req, res) => {
 
     const { clause, params } = isAll ? { clause: '', params: [] } : await getExerciceDateFilter();
 
+    // Filtre date propre à l'export de la Balance (indépendant du toggle "Toutes les dates" et de
+    // l'exercice actif) : reflète les deux champs dateDebut/dateFin choisis à l'écran, s'ils sont
+    // fournis. N'affecte que la feuille/le tableau Balance, pas le Journal_General ci-dessous.
+    const balanceDateDebut = req.query.dateDebut;
+    const balanceDateFin = req.query.dateFin;
+    const balanceClauseOverride = (balanceDateDebut && balanceDateFin)
+      ? { clause: 'date >= ? AND date <= ?', params: [balanceDateDebut, balanceDateFin] }
+      : { clause, params };
+
     // Fetch custom account titles map
     const customRows = await db.runSelect("SELECT compte, libelle FROM chart_of_accounts");
     const customMap = {};
@@ -1761,10 +1882,10 @@ app.get('/api/export/etats-financiers', async (req, res) => {
     let rawBalanceRows = await db.runSelect(`
       SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
       FROM journal
-      ${clause ? `WHERE ${clause}` : ''}
+      ${balanceClauseOverride.clause ? `WHERE ${balanceClauseOverride.clause}` : ''}
       GROUP BY compte
       ORDER BY compte ASC
-    `, params);
+    `, balanceClauseOverride.params);
 
     let rawJournalRows = await db.runSelect(`
       SELECT * FROM journal
@@ -1787,9 +1908,9 @@ app.get('/api/export/etats-financiers', async (req, res) => {
       if (!matchClass) return false;
       if (!searchParam) return true;
       // Mêmes champs que la recherche de l'onglet Journal à l'écran (voir /api/journal) : sans ça,
-      // un export filtré par libellé/n° facture/référence/tiers/code journal ne matchait jamais rien
-      // et renvoyait un fichier différent de ce que l'utilisateur voyait affiché.
-      const haystack = [r.compte, r.libelle, r.n_facture, r.reference, r.compte_tiers, r.code_journal]
+      // un export filtré par libellé/n° facture/référence/tiers/code journal/date ne matchait jamais
+      // rien et renvoyait un fichier différent de ce que l'utilisateur voyait affiché.
+      const haystack = [r.compte, r.libelle, r.n_facture, r.reference, r.compte_tiers, r.code_journal, r.date]
         .map(v => String(v == null ? '' : v).toLowerCase())
         .join(' | ');
       return haystack.includes(searchParam);
@@ -2413,6 +2534,16 @@ function splitAndValidateSqlStatements(rawSql) {
     // Normaliser préfixe public.table -> table
     stmt = stmt.replace(/\bpublic\.(\w+)\b/gi, '$1').trim();
 
+    // Contrairement à SELECT, SQLite exige le mot-clé AS devant un alias de table dans DELETE/UPDATE
+    // ("DELETE FROM journal j WHERE ..." lève SQLITE_ERROR: near "j": syntax error) — le modèle
+    // génère régulièrement cette forme (naturelle en MySQL/Postgres) pour pouvoir référencer la
+    // ligne dans une sous-requête corrélée (ex: détection de doublons). On l'insère automatiquement
+    // plutôt que de faire échouer une action par ailleurs valide sur ce seul détail de dialecte.
+    stmt = stmt.replace(
+      /^(DELETE\s+FROM|UPDATE)\s+([A-Za-z_]\w*)\s+(?!AS\b|WHERE\b|SET\b|INDEXED\b|NOT\b)([A-Za-z_]\w*)\b/i,
+      '$1 $2 AS $3'
+    );
+
     const sqlUpper = stmt.toUpperCase();
 
     // Bloquer les commandes système bas-niveau de manipulation de fichiers
@@ -2432,7 +2563,7 @@ function splitAndValidateSqlStatements(rawSql) {
   return { statements: cleanStatements };
 }
 
-app.post('/api/audit/apply', (req, res) => {
+app.post('/api/audit/apply', async (req, res) => {
   const { sql: rawSql } = req.body;
   const validation = splitAndValidateSqlStatements(rawSql);
 
@@ -2442,35 +2573,76 @@ app.post('/api/audit/apply', (req, res) => {
 
   const statements = validation.statements;
 
+  // Le Cerveau IA (chat/audit) ne doit jamais pouvoir toucher une écriture en dehors de l'exercice
+  // comptable actuellement ouvert (`settings.SELECTED_EXERCICE_ID`) — ni clôtures antérieures, ni
+  // exercices futurs. splitAndValidateSqlStatements autorise INSERT/UPDATE/DELETE/CREATE/ALTER/DROP :
+  // plutôt que tenter d'analyser le SQL généré pour en déduire les lignes touchées (peu fiable quelle
+  // que soit sa forme), on vérifie l'invariant réel après exécution : aucune ligne de `journal` située
+  // hors de l'exercice ouvert ne doit avoir changé, ni en apparaître une nouvelle. Toute violation
+  // annule la transaction entière.
+  const activeExercice = await getActiveExercice();
+  if (!activeExercice) {
+    return res.status(400).json({ error: "Aucun exercice comptable n'est actuellement ouvert : le Cerveau IA ne peut appliquer aucune modification tant qu'un exercice n'est pas sélectionné." });
+  }
+  const { date_debut, date_fin } = activeExercice;
+
+  const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) { if (err) reject(err); else resolve(this); });
+  });
+  const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows || []); });
+  });
+
   db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
+    (async () => {
+      try {
+        await dbRun("BEGIN TRANSACTION");
+        await dbRun("DROP TABLE IF EXISTS temp._pre_outside_journal");
+        await dbRun(
+          "CREATE TEMP TABLE _pre_outside_journal AS SELECT * FROM journal WHERE date < ? OR date > ?",
+          [date_debut, date_fin]
+        );
 
-    let totalChanges = 0;
-
-    const executeNext = (index) => {
-      if (index >= statements.length) {
-        return db.run("COMMIT", (commitErr) => {
-          if (commitErr) return res.status(500).json({ error: commitErr.message });
-          res.json({ 
-            success: true, 
-            changes: totalChanges, 
-            statementsCount: statements.length,
-            message: `${statements.length} action(s) exécutée(s) avec succès (${totalChanges} ligne(s) affectée(s)).` 
-          });
-        });
-      }
-
-      const stmt = statements[index];
-      db.run(stmt, function (err) {
-        if (err) {
-          return db.run("ROLLBACK", () => res.status(500).json({ error: `Erreur SQL sur [${stmt.slice(0, 40)}...] : ${err.message}` }));
+        let totalChanges = 0;
+        for (const stmt of statements) {
+          try {
+            const result = await dbRun(stmt);
+            totalChanges += (result.changes || 0);
+          } catch (stmtErr) {
+            throw new Error(`Erreur SQL sur [${stmt.slice(0, 40)}...] : ${stmtErr.message}`);
+          }
         }
-        totalChanges += (this.changes || 0);
-        executeNext(index + 1);
-      });
-    };
 
-    executeNext(0);
+        const staleOrDeleted = await dbAll(
+          "SELECT COUNT(*) as c FROM (SELECT * FROM _pre_outside_journal EXCEPT SELECT * FROM journal)"
+        );
+        const newlyOutside = await dbAll(
+          "SELECT COUNT(*) as c FROM journal WHERE (date < ? OR date > ?) AND id NOT IN (SELECT id FROM _pre_outside_journal)",
+          [date_debut, date_fin]
+        );
+        const violations = (staleOrDeleted[0]?.c || 0) + (newlyOutside[0]?.c || 0);
+
+        await dbRun("DROP TABLE IF EXISTS temp._pre_outside_journal");
+
+        if (violations > 0) {
+          await dbRun("ROLLBACK");
+          return res.status(400).json({
+            error: `Action refusée : elle affecterait ${violations} écriture(s) en dehors de l'exercice actuellement ouvert (${activeExercice.libelle || ''}). Le Cerveau IA ne peut modifier que l'exercice comptable actif.`
+          });
+        }
+
+        await dbRun("COMMIT");
+        res.json({
+          success: true,
+          changes: totalChanges,
+          statementsCount: statements.length,
+          message: `${statements.length} action(s) exécutée(s) avec succès (${totalChanges} ligne(s) affectée(s)).`
+        });
+      } catch (err) {
+        try { await dbRun("ROLLBACK"); } catch (e) {}
+        res.status(500).json({ error: err.message || "Erreur lors de l'exécution SQL." });
+      }
+    })();
   });
 });
 

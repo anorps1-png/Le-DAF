@@ -1,7 +1,59 @@
-import { useState, useEffect, useRef, Fragment } from 'react';
+import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, X, Download, RefreshCw } from 'lucide-react';
 import { getAccountLabel } from '../utils/ohadaPlan';
 import { fetchDirectSupabaseJournal, fetchDirectSupabaseTiers } from '../utils/supabaseClient';
+
+// Sélecteur de compte avec liste déroulante (n° + intitulé), filtrable en tapant : le champ reste
+// un texte libre (un compte peut être utilisé pour la première fois), la liste n'est qu'une aide.
+const AccountPicker = ({ value, onChange, accounts, style, placeholder }) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const q = String(value || '').trim().toLowerCase();
+  const filtered = (!q
+    ? accounts
+    : accounts.filter(a => a.compte.toLowerCase().includes(q) || a.libelle.toLowerCase().includes(q))
+  ).slice(0, 50);
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', ...style }}>
+      <input
+        className="input"
+        style={{ padding: '0.35rem', width: '100%' }}
+        value={value || ''}
+        placeholder={placeholder || 'N° compte'}
+        onFocus={() => setOpen(true)}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+      />
+      {open && filtered.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, zIndex: 50, marginTop: '2px',
+          width: '340px', maxHeight: '260px', overflowY: 'auto', textAlign: 'left',
+          background: 'var(--color-bg, #fff)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.18)'
+        }}>
+          {filtered.map(a => (
+            <div
+              key={a.compte}
+              onMouseDown={(e) => { e.preventDefault(); onChange(a.compte); setOpen(false); }}
+              style={{ padding: '0.4rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem', borderBottom: '1px solid rgba(0,0,0,0.05)' }}
+            >
+              <strong>{a.compte}</strong> — {a.libelle}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = {}) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'saisie');
@@ -19,9 +71,22 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   const [glComptes, setGlComptes] = useState([]);
   const [glSelectedCompte, setGlSelectedCompte] = useState(initialCompte || '');
   const [glSelectedJournal, setGlSelectedJournal] = useState('');
+  // Le Grand Livre par compte et par journal sont deux axes de consultation indépendants et
+  // mutuellement exclusifs : 'compte' affiche tout le compte sélectionné (tous journaux confondus),
+  // 'journal' affiche tout le journal sélectionné (tous comptes confondus). Celui qu'on vient de
+  // toucher devient prioritaire — c'est l'autre sélecteur qui est alors ignoré, jamais combiné.
+  const [glFilterMode, setGlFilterMode] = useState('compte');
   const [glLedger, setGlLedger] = useState(null);
+  const [glJournalLedger, setGlJournalLedger] = useState(null);
   const [glLoading, setGlLoading] = useState(false);
   const [glError, setGlError] = useState('');
+  // Sélection multiple pour le changement de compte en masse : indépendante du mode d'affichage
+  // (compte ou journal), remise à zéro dès que le filtre ou le contenu affiché change.
+  const [selectedGlIds, setSelectedGlIds] = useState([]);
+  const [glRefreshTick, setGlRefreshTick] = useState(0);
+  const [bulkNewCompte, setBulkNewCompte] = useState('');
+  const [bulkApplying, setBulkApplying] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState(null);
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [highlightRowId, setHighlightRowId] = useState(null);
@@ -45,6 +110,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   const [balanceFilterCompte, setBalanceFilterCompte] = useState('');
   const [balanceClassFilter, setBalanceClassFilter] = useState('');
   const [balanceFilter, setBalanceFilter] = useState('');
+  const [balanceDateDebut, setBalanceDateDebut] = useState('');
+  const [balanceDateFin, setBalanceDateFin] = useState('');
   const [journalCodes, setJournalCodes] = useState(['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR']);
   const [customAccounts, setCustomAccounts] = useState({});
   const [journalSearch, setJournalSearch] = useState('');
@@ -139,8 +206,35 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
       })
       .catch(e => console.error(e));
 
+    // Chargé ici (plutôt que seulement à l'ouverture de l'onglet Grand Livre) pour que le
+    // sélecteur de compte de l'édition inline du Journal dispose déjà de la liste des comptes
+    // réellement utilisés, sans attendre que l'utilisateur visite un autre onglet.
+    fetch('/api/grand-livre/comptes')
+      .then(res => res.json())
+      .then(rows => {
+        if (Array.isArray(rows)) setGlComptes(rows);
+      })
+      .catch(e => console.error(e));
+
     fetchDsfData();
   }, []);
+
+  // Liste fusionnée pour le sélecteur de compte : les comptes réellement mouvementés (glComptes,
+  // les seuls qu'on retrouve vraiment dans le Journal/Grand Livre) d'abord, complétés par les
+  // intitulés personnalisés (customAccounts) pour ceux qui n'ont pas encore d'écriture.
+  const accountOptions = useMemo(() => {
+    const map = new Map();
+    (glComptes || []).forEach(c => {
+      const compte = String(c.compte || '');
+      if (compte) map.set(compte, getAccountLabel(compte, customAccounts));
+    });
+    Object.keys(customAccounts || {}).forEach(compte => {
+      if (!map.has(compte)) map.set(compte, customAccounts[compte]);
+    });
+    return Array.from(map.entries())
+      .map(([compte, libelle]) => ({ compte, libelle }))
+      .sort((a, b) => a.compte.localeCompare(b.compte));
+  }, [glComptes, customAccounts]);
 
   const totalDebit = manualLines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0);
   const totalCredit = manualLines.reduce((s, l) => s + (parseFloat(l.credit) || 0), 0);
@@ -205,6 +299,11 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
           qp.set('offset', String((journalPage - 1) * journalPageSize));
         }
         url = `/api/journal?${qp.toString()}`;
+      } else if (endpoint === 'balance' && balanceDateDebut && balanceDateFin) {
+        const qp = new URLSearchParams();
+        qp.set('dateDebut', balanceDateDebut);
+        qp.set('dateFin', balanceDateFin);
+        url = `/api/balance?${qp.toString()}`;
       }
       const res = await fetch(url);
       const text = await res.text();
@@ -259,7 +358,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
     if (activeTab === 'bilan') fetchEtats('bilan');
     if (activeTab === 'resultat') fetchEtats('resultat');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, showAllDates, journalPage, journalPageSize, journalSearchDebounced]);
+  }, [activeTab, showAllDates, journalPage, journalPageSize, journalSearchDebounced, balanceDateDebut, balanceDateFin]);
 
   useEffect(() => {
     if (activeTab !== 'grandlivre') return;
@@ -275,11 +374,32 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   }, [activeTab]);
 
   useEffect(() => {
-    if (!glSelectedCompte || activeTab !== 'grandlivre') return;
+    if (activeTab !== 'grandlivre') return;
+    setSelectedGlIds([]);
+    setBulkNewCompte('');
+    setBulkMsg(null);
+
+    if (glFilterMode === 'journal') {
+      if (!glSelectedJournal) return;
+      setGlLoading(true);
+      setGlError('');
+      setGlLedger(null);
+      fetch(`/api/grand-livre/par-journal/${encodeURIComponent(glSelectedJournal)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) { setGlError(data.error); setGlJournalLedger(null); }
+          else setGlJournalLedger(data);
+        })
+        .catch(() => setGlError('Impossible de charger le Grand Livre. Vérifiez que le serveur est démarré.'))
+        .finally(() => setGlLoading(false));
+      return;
+    }
+
+    if (!glSelectedCompte) return;
     setGlLoading(true);
     setGlError('');
-    const qs = glSelectedJournal ? `?journal=${encodeURIComponent(glSelectedJournal)}` : '';
-    fetch(`/api/grand-livre/${encodeURIComponent(glSelectedCompte)}${qs}`)
+    setGlJournalLedger(null);
+    fetch(`/api/grand-livre/${encodeURIComponent(glSelectedCompte)}`)
       .then(res => res.json())
       .then(data => {
         if (data.error) { setGlError(data.error); setGlLedger(null); }
@@ -287,10 +407,41 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
       })
       .catch(() => setGlError('Impossible de charger le Grand Livre. Vérifiez que le serveur est démarré.'))
       .finally(() => setGlLoading(false));
-  }, [glSelectedCompte, glSelectedJournal, activeTab]);
+  }, [glFilterMode, glSelectedCompte, glSelectedJournal, activeTab, glRefreshTick]);
+
+  const toggleGlSelected = (id) => {
+    setSelectedGlIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  const applyBulkCompte = async () => {
+    if (!bulkNewCompte.trim() || selectedGlIds.length === 0) return;
+    setBulkApplying(true);
+    setBulkMsg(null);
+    try {
+      const res = await fetch('/api/journal/bulk-compte', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedGlIds, compte: bulkNewCompte.trim() })
+      });
+      const result = await res.json();
+      if (!res.ok || result.error) {
+        setBulkMsg({ type: 'error', text: result.error || 'Erreur lors du changement de compte.' });
+      } else {
+        setBulkMsg({ type: 'success', text: `${result.changes} écriture(s) rattachée(s) au compte ${bulkNewCompte.trim()}.` });
+        setSelectedGlIds([]);
+        setBulkNewCompte('');
+        setGlRefreshTick(t => t + 1);
+      }
+    } catch (e) {
+      setBulkMsg({ type: 'error', text: 'Impossible de joindre le serveur.' });
+    } finally {
+      setBulkApplying(false);
+    }
+  };
 
   const openGrandLivre = (compte) => {
     setGlSelectedCompte(compte);
+    setGlFilterMode('compte');
     setActiveTab('grandlivre');
   };
 
@@ -839,7 +990,12 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                                 <input className="input" style={{ padding: '0.35rem', width: '90px' }} value={editRowForm.reference} onChange={e => setEditRowForm({ ...editRowForm, reference: e.target.value })} />
                               </td>
                               <td style={{ padding: '0.4rem 0.5rem' }}>
-                                <input className="input" style={{ padding: '0.35rem', width: '90px' }} list="chart-of-accounts-list" value={editRowForm.compte} onChange={e => setEditRowForm({ ...editRowForm, compte: e.target.value })} />
+                                <AccountPicker
+                                  value={editRowForm.compte}
+                                  onChange={v => setEditRowForm({ ...editRowForm, compte: v })}
+                                  accounts={accountOptions}
+                                  style={{ width: '110px' }}
+                                />
                               </td>
                               <td style={{ padding: '0.4rem 0.5rem' }}>
                                 <input className="input" style={{ padding: '0.35rem', width: '110px' }} value={editRowForm.compte_tiers} onChange={e => setEditRowForm({ ...editRowForm, compte_tiers: e.target.value })} />
@@ -924,17 +1080,26 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
         );
       }
 
-      case 'grandlivre':
+      case 'grandlivre': {
+        const compteActif = glFilterMode === 'compte';
+        const activeLabelStyle = { display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-primary)' };
+        const inactiveLabelStyle = { display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500, color: 'var(--color-text-muted)' };
+
         return (
           <div>
+            {/* Les deux filtres sont indépendants et mutuellement exclusifs : celui qu'on vient de
+                changer devient prioritaire et affiche l'intégralité de sa sélection (tout le compte,
+                ou tout le journal), l'autre sélecteur reste visible mais n'est pas appliqué. */}
             <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
               <div style={{ maxWidth: '480px', flex: '1 1 320px' }}>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Compte</label>
+                <label style={compteActif ? activeLabelStyle : inactiveLabelStyle}>
+                  Compte {compteActif ? '— filtre actif' : '(ignoré tant que le journal est prioritaire)'}
+                </label>
                 <select
                   className="input"
-                  style={{ padding: '0.5rem', width: '100%' }}
+                  style={{ padding: '0.5rem', width: '100%', opacity: compteActif ? 1 : 0.55 }}
                   value={glSelectedCompte}
-                  onChange={e => setGlSelectedCompte(e.target.value)}
+                  onChange={e => { setGlSelectedCompte(e.target.value); setGlFilterMode('compte'); }}
                 >
                   {glComptes.length === 0 && <option value="">Aucun compte avec écritures</option>}
                   {glComptes.map(c => (
@@ -945,13 +1110,18 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                 </select>
               </div>
               <div style={{ maxWidth: '220px', flex: '1 1 160px' }}>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', fontWeight: 500 }}>Journal</label>
+                <label style={!compteActif ? activeLabelStyle : inactiveLabelStyle}>
+                  Journal {!compteActif ? '— filtre actif' : '(ignoré tant que le compte est prioritaire)'}
+                </label>
                 <select
                   className="input"
-                  style={{ padding: '0.5rem', width: '100%' }}
+                  style={{ padding: '0.5rem', width: '100%', opacity: compteActif ? 0.55 : 1 }}
                   value={glSelectedJournal}
-                  onChange={e => setGlSelectedJournal(e.target.value)}
-                  title="Filtrer les écritures de ce compte par code journal"
+                  onChange={e => {
+                    setGlSelectedJournal(e.target.value);
+                    setGlFilterMode(e.target.value ? 'journal' : 'compte');
+                  }}
+                  title="Afficher toutes les écritures de ce journal, tous comptes confondus"
                 >
                   <option value="">Tous les journaux</option>
                   {journalCodes.map(code => (
@@ -960,6 +1130,40 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                 </select>
               </div>
             </div>
+
+            {selectedGlIds.length > 0 && (
+              <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid var(--color-primary)', borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <strong style={{ fontSize: '0.85rem' }}>{selectedGlIds.length} écriture(s) sélectionnée(s)</strong>
+                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Rattacher au compte :</span>
+                <AccountPicker
+                  value={bulkNewCompte}
+                  onChange={setBulkNewCompte}
+                  accounts={accountOptions}
+                  style={{ width: '220px' }}
+                />
+                <button
+                  className="btn btn-primary"
+                  disabled={!bulkNewCompte.trim() || bulkApplying}
+                  onClick={applyBulkCompte}
+                  style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+                >
+                  {bulkApplying ? 'Application...' : `Appliquer à ${selectedGlIds.length} écriture(s)`}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => { setSelectedGlIds([]); setBulkNewCompte(''); }}
+                  style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+                >
+                  Annuler la sélection
+                </button>
+              </div>
+            )}
+
+            {bulkMsg && (
+              <div style={{ marginBottom: '1rem', padding: '0.6rem 1rem', borderRadius: 'var(--radius-md)', fontSize: '0.85rem', background: bulkMsg.type === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)', color: bulkMsg.type === 'error' ? '#b91c1c' : '#047857' }}>
+                {bulkMsg.text}
+              </div>
+            )}
 
             {glLoading && <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Chargement du Grand Livre...</div>}
 
@@ -970,12 +1174,19 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
               </div>
             )}
 
-            {!glLoading && !glError && glLedger && (
+            {!glLoading && !glError && compteActif && glLedger && (
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '900px', fontSize: '0.875rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
-                      <th style={{ padding: '0.75rem 0.5rem 0.75rem 0' }}>Date</th>
+                      <th style={{ padding: '0.75rem 0.5rem 0.75rem 0', width: '2rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={glLedger.lignes.length > 0 && selectedGlIds.length === glLedger.lignes.length}
+                          onChange={e => setSelectedGlIds(e.target.checked ? glLedger.lignes.map(l => l.id) : [])}
+                        />
+                      </th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Date</th>
                       <th style={{ padding: '0.75rem 0.5rem' }}>Journal</th>
                       <th style={{ padding: '0.75rem 0.5rem' }}>N° Facture</th>
                       <th style={{ padding: '0.75rem 0.5rem' }}>Référence</th>
@@ -989,13 +1200,13 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                   <tbody>
                     {!!glLedger.solde_ouverture && (
                       <tr style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(0,0,0,0.02)', fontStyle: 'italic', color: 'var(--color-text-muted)' }}>
-                        <td colSpan="8" style={{ padding: '0.5rem' }}>Solde d'ouverture (reporté des exercices antérieurs)</td>
+                        <td colSpan="9" style={{ padding: '0.5rem' }}>Solde d'ouverture (reporté des exercices antérieurs)</td>
                         <td style={{ padding: '0.5rem', textAlign: 'right', fontWeight: 500 }}>{glLedger.solde_ouverture.toLocaleString()}</td>
                       </tr>
                     )}
                     {glLedger.lignes.length === 0 ? (
                       <tr>
-                        <td colSpan="9" style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        <td colSpan="10" style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
                           Aucune écriture pour ce compte sur la période sélectionnée.
                         </td>
                       </tr>
@@ -1008,6 +1219,9 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                         onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.03)'}
                         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                       >
+                        <td style={{ padding: '0.5rem' }} onClick={e => e.stopPropagation()}>
+                          <input type="checkbox" checked={selectedGlIds.includes(l.id)} onChange={() => toggleGlSelected(l.id)} />
+                        </td>
                         <td style={{ padding: '0.5rem 0.5rem 0.5rem 0' }}>{l.date}</td>
                         <td style={{ padding: '0.5rem' }}>{l.code_journal}</td>
                         <td style={{ padding: '0.5rem' }}>{l.n_facture}</td>
@@ -1025,8 +1239,73 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                   {glLedger.lignes.length > 0 && (
                     <tfoot>
                       <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 'bold' }}>
-                        <td colSpan="8" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Solde final</td>
+                        <td colSpan="9" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Solde final</td>
                         <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{glLedger.solde_final.toLocaleString()}</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            )}
+
+            {!glLoading && !glError && !compteActif && glJournalLedger && (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '900px', fontSize: '0.875rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
+                      <th style={{ padding: '0.75rem 0.5rem 0.75rem 0', width: '2rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={glJournalLedger.lignes.length > 0 && selectedGlIds.length === glJournalLedger.lignes.length}
+                          onChange={e => setSelectedGlIds(e.target.checked ? glJournalLedger.lignes.map(l => l.id) : [])}
+                        />
+                      </th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Date</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Compte</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>N° Facture</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Référence</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Libellé</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Tiers</th>
+                      <th style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Débit</th>
+                      <th style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Crédit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {glJournalLedger.lignes.length === 0 ? (
+                      <tr>
+                        <td colSpan="9" style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                          Aucune écriture pour ce journal sur la période sélectionnée.
+                        </td>
+                      </tr>
+                    ) : glJournalLedger.lignes.map(l => (
+                      <tr
+                        key={l.id}
+                        onClick={() => openJournalEntry(l.id)}
+                        title="Voir/modifier cette écriture dans le Journal"
+                        style={{ borderBottom: '1px solid rgba(0,0,0,0.05)', cursor: 'pointer' }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.03)'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <td style={{ padding: '0.5rem' }} onClick={e => e.stopPropagation()}>
+                          <input type="checkbox" checked={selectedGlIds.includes(l.id)} onChange={() => toggleGlSelected(l.id)} />
+                        </td>
+                        <td style={{ padding: '0.5rem 0.5rem 0.5rem 0' }}>{l.date}</td>
+                        <td style={{ padding: '0.5rem' }}>{l.compte} - {getAccountLabel(l.compte, customAccounts)}</td>
+                        <td style={{ padding: '0.5rem' }}>{l.n_facture}</td>
+                        <td style={{ padding: '0.5rem' }}>{l.reference}</td>
+                        <td style={{ padding: '0.5rem' }}>{l.libelle}</td>
+                        <td style={{ padding: '0.5rem' }}>{l.compte_tiers}</td>
+                        <td style={{ padding: '0.5rem', textAlign: 'right' }}>{l.debit > 0 ? l.debit.toLocaleString() : ''}</td>
+                        <td style={{ padding: '0.5rem', textAlign: 'right' }}>{l.credit > 0 ? l.credit.toLocaleString() : ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  {glJournalLedger.lignes.length > 0 && (
+                    <tfoot>
+                      <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 'bold' }}>
+                        <td colSpan="7" style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Totaux</td>
+                        <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{glJournalLedger.total_debit.toLocaleString()}</td>
+                        <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>{glJournalLedger.total_credit.toLocaleString()}</td>
                       </tr>
                     </tfoot>
                   )}
@@ -1035,6 +1314,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
             )}
           </div>
         );
+      }
 
       case 'balance': {
         const getOhadaTitle = (compteStr) => {
@@ -1093,6 +1373,43 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
             {/* BARRE DE FILTRAGE DE LA BALANCE PAR NUMÉRO DE COMPTE & CLASSE */}
             <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: 'var(--radius-md)', marginBottom: '1.5rem', border: '1px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 300px', display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--color-text-muted)' }}>
+                      📅 Date début
+                    </label>
+                    <input
+                      type="date"
+                      className="input"
+                      value={balanceDateDebut}
+                      onChange={e => setBalanceDateDebut(e.target.value)}
+                      style={{ padding: '0.5rem' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--color-text-muted)' }}>
+                      📅 Date fin
+                    </label>
+                    <input
+                      type="date"
+                      className="input"
+                      value={balanceDateFin}
+                      onChange={e => setBalanceDateFin(e.target.value)}
+                      style={{ padding: '0.5rem' }}
+                    />
+                  </div>
+                  {(balanceDateDebut || balanceDateFin) && (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => { setBalanceDateDebut(''); setBalanceDateFin(''); }}
+                      title="Revenir à l'exercice ouvert"
+                      style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}
+                    >
+                      <X size={14} /> Réinitialiser
+                    </button>
+                  )}
+                </div>
+
                 <div style={{ flex: '1 1 260px', position: 'relative' }}>
                   <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--color-text-muted)' }}>
                     🔍 Filtrer par N° de compte ou libellé :
@@ -2041,6 +2358,9 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
     if (activeTab === 'balance') {
       if (balanceFilterCompte) url += `&search=${encodeURIComponent(balanceFilterCompte)}`;
       if (balanceClassFilter) url += `&classe=${encodeURIComponent(balanceClassFilter)}`;
+      if (balanceDateDebut && balanceDateFin) {
+        url += `&dateDebut=${encodeURIComponent(balanceDateDebut)}&dateFin=${encodeURIComponent(balanceDateFin)}`;
+      }
     }
     // Le bouton annonce "respecte les filtres actifs" : sans ça, exporter depuis l'onglet Journal
     // ignorait silencieusement la recherche tapée à l'écran et le bouton "Toutes les dates", renvoyant
