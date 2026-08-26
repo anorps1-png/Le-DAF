@@ -1091,9 +1091,11 @@ app.get('/api/journal', async (req, res) => {
     }
     
     if (req.query.search) {
-      whereClauses.push('(compte LIKE ? OR libelle LIKE ? OR n_facture LIKE ? OR reference LIKE ? OR compte_tiers LIKE ? OR code_journal LIKE ?)');
+      // Le placeholder du champ annonce aussi "date" : sans la colonne `date` ici, chercher
+      // "2026-01" ou "15/03" ne retournait jamais rien alors que l'utilisateur s'y attend.
+      whereClauses.push('(compte LIKE ? OR libelle LIKE ? OR n_facture LIKE ? OR reference LIKE ? OR compte_tiers LIKE ? OR code_journal LIKE ? OR date LIKE ?)');
       const s = `%${req.query.search}%`;
-      sqlParams.push(s, s, s, s, s, s);
+      sqlParams.push(s, s, s, s, s, s, s);
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
