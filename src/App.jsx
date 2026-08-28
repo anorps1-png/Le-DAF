@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft, Trash2 } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -63,6 +63,19 @@ const ExerciceSelector = ({ onChange }) => {
     }
   };
 
+  const deleteExercice = async (e, ex) => {
+    e.stopPropagation();
+    if (!window.confirm(`Supprimer l'exercice "${ex.libelle}" (${ex.date_debut} → ${ex.date_fin}) ? Les écritures elles-mêmes ne sont pas supprimées, seul le regroupement par exercice l'est.`)) return;
+    try {
+      await fetch(`/api/exercices/${ex.id}`, { method: 'DELETE' });
+      const wasActive = active && active.id === ex.id;
+      await load();
+      if (wasActive) onChange && onChange(null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const createExercice = async (e) => {
     e.preventDefault();
     setError('');
@@ -115,13 +128,26 @@ const ExerciceSelector = ({ onChange }) => {
             Tous les exercices (aucun filtre)
           </button>
           {exercices.map(ex => (
-            <button
+            <div
               key={ex.id}
-              onClick={() => select(ex.id)}
-              style={{ width: '100%', textAlign: 'left', padding: '0.5rem 0.75rem', background: active && active.id === ex.id ? 'rgba(59,130,246,0.1)' : 'transparent', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.85rem' }}
+              style={{ display: 'flex', alignItems: 'stretch', gap: '0.25rem', background: active && active.id === ex.id ? 'rgba(59,130,246,0.1)' : 'transparent', borderRadius: 'var(--radius-sm)' }}
             >
-              {ex.libelle} <span style={{ color: 'var(--color-text-muted)' }}>({ex.date_debut} → {ex.date_fin})</span>
-            </button>
+              <button
+                onClick={() => select(ex.id)}
+                style={{ flex: 1, textAlign: 'left', padding: '0.5rem 0.75rem', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '0.85rem' }}
+              >
+                {ex.libelle} <span style={{ color: 'var(--color-text-muted)' }}>({ex.date_debut} → {ex.date_fin})</span>
+              </button>
+              <button
+                onClick={(e) => deleteExercice(e, ex)}
+                title="Supprimer cet exercice"
+                style={{ display: 'flex', alignItems: 'center', padding: '0 0.6rem', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}
+                onMouseEnter={ev => ev.currentTarget.style.color = 'var(--color-error)'}
+                onMouseLeave={ev => ev.currentTarget.style.color = 'var(--color-text-muted)'}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           ))}
 
           <div style={{ borderTop: '1px solid var(--color-border)', marginTop: '0.5rem', paddingTop: '0.5rem' }}>
@@ -222,12 +248,24 @@ const ChatbotIA = ({ messages, setMessages, input, setInput, loading, setLoading
     scrollToBottom();
   }, [messages]);
 
+  // Redonne la main au champ de saisie à l'arrivée sur ce composant : `autoFocus` seul suffit en
+  // théorie (ce composant est démonté/remonté à chaque changement de module), mais un focus
+  // explicite est plus fiable dans un onglet navigateur classique (par opposition à l'app
+  // Electron), où l'attribut HTML autoFocus est parfois silencieusement ignoré.
+  useEffect(() => {
+    chatInputRef.current?.focus();
+  }, []);
+
   const handleResetChat = () => {
     if (window.confirm("Voulez-vous réinitialiser la discussion et démarrer une nouvelle conversation ?")) {
       setMessages(defaultWelcomeMessage);
       try {
         localStorage.removeItem('agent_ohada_chat_history');
       } catch (e) {}
+      // window.confirm() est bloquant et rend la main au document une fois fermé, pas forcément
+      // au champ de saisie : sans ce refocus explicite, l'utilisateur devait recliquer dans le
+      // champ avant de pouvoir retaper quoi que ce soit après une réinitialisation.
+      setTimeout(() => chatInputRef.current?.focus(), 50);
     }
   };
 
@@ -398,11 +436,10 @@ const ChatbotIA = ({ messages, setMessages, input, setInput, loading, setLoading
         <button className="btn" style={{ padding: '0.75rem', background: 'rgba(255,255,255,0.8)', borderRadius: '50%' }}>
           <Mic size={20} color="var(--color-text-muted)" />
         </button>
-        <input 
+        <textarea
           ref={chatInputRef}
-          type="text" 
-          className="input" 
-          placeholder="Posez une question sur vos finances..." 
+          className="input"
+          placeholder="Posez une question sur vos finances... (Maj+Entrée pour aller à la ligne)"
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => {
@@ -410,8 +447,10 @@ const ChatbotIA = ({ messages, setMessages, input, setInput, loading, setLoading
               e.preventDefault();
               handleSend();
             }
+            // Maj+Entrée : comportement natif du textarea (saut de ligne), rien à faire ici.
           }}
-          style={{ flex: 1 }} 
+          rows={2}
+          style={{ flex: 1, resize: 'none', maxHeight: '140px', overflowY: 'auto', fontFamily: 'inherit', lineHeight: 1.4 }}
           autoFocus
         />
         <button className="btn btn-primary" onClick={handleSend} disabled={loading} style={{ minWidth: '100px' }}>

@@ -118,6 +118,36 @@ const upload = multer({
   }
 });
 
+// --- FICHIERS COMPTABLES (multi-dossiers façon Sage Saari, équivalent web de "Ouvrir"/"Nouveau"
+// fichier comptable" du menu Electron) : chaque .sqlite = un dossier comptable d'entreprise,
+// stocké ici plutôt que dans userData (qui n'existe qu'en contexte Electron). ---
+// Ne jamais baser ce dossier sur __dirname en Electron packagé : server/ vit alors dans
+// app.asar (archive en lecture seule), y écrire échouerait silencieusement en production.
+// USER_DATA_PATH (fixé par electron/main.cjs) pointe vers un dossier utilisateur réel et
+// inscriptible, cohérent avec l'emplacement du .sqlite par défaut lui-même.
+const comptesDir = isVercelServer
+  ? path.join('/tmp', 'comptes')
+  : process.env.USER_DATA_PATH
+  ? path.join(process.env.USER_DATA_PATH, 'comptes')
+  : path.join(__dirname, 'data', 'comptes');
+try {
+  if (!fs.existsSync(comptesDir)) fs.mkdirSync(comptesDir, { recursive: true });
+} catch (e) {
+  // Ignorer si filesystem restreint (comme exportsDir ci-dessus)
+}
+
+const uploadDb = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+    if (!['sqlite', 'sqlite3', 'db'].includes(ext)) {
+      return cb(new Error(`Type de fichier non autorisé : .${ext} (attendu : .sqlite)`));
+    }
+    cb(null, true);
+  }
+});
+
 // --- EXERCICES COMPTABLES ---
 // journal.date reste une simple chaîne ISO (YYYY-MM-DD) : filtrer par exercice consiste à
 // comparer cette chaîne (comparaison lexicographique valide pour ISO) aux bornes de l'exercice
@@ -259,9 +289,9 @@ app.get('/api/settings', sensitiveLimiter, (req, res) => {
 });
 
 app.post('/api/settings', sensitiveLimiter, (req, res) => {
-  const { GEMINI_API_KEY, GEMINI_MODEL, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL, GROQ_API_KEY } = req.body;
+  const { GEMINI_API_KEY, GEMINI_MODEL, OPENAI_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEFAULT_AI, OPENAI_BASE_URL, OPENAI_MODEL, GROQ_API_KEY, DSF_TEMPLATE_PATH } = req.body;
   const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-  
+
   if (GEMINI_API_KEY !== undefined) stmt.run('GEMINI_API_KEY', GEMINI_API_KEY);
   if (GEMINI_MODEL !== undefined) stmt.run('GEMINI_MODEL', GEMINI_MODEL);
   if (OPENAI_API_KEY !== undefined) stmt.run('OPENAI_API_KEY', OPENAI_API_KEY);
@@ -271,9 +301,136 @@ app.post('/api/settings', sensitiveLimiter, (req, res) => {
   if (OPENAI_BASE_URL !== undefined) stmt.run('OPENAI_BASE_URL', OPENAI_BASE_URL);
   if (OPENAI_MODEL !== undefined) stmt.run('OPENAI_MODEL', OPENAI_MODEL);
   if (GROQ_API_KEY !== undefined) stmt.run('GROQ_API_KEY', GROQ_API_KEY);
-  
+  if (DSF_TEMPLATE_PATH !== undefined) stmt.run('DSF_TEMPLATE_PATH', DSF_TEMPLATE_PATH);
+
   stmt.finalize();
   res.json({ success: true });
+});
+
+// --- FICHIER COMPTABLE ACTIF (version web de "Ouvrir"/"Nouveau fichier comptable...") ---
+// En Electron, changer de fichier comptable relance toute l'application (electron/main.cjs,
+// switchDatabaseFile) pour garantir un état 100% propre. Depuis un navigateur il n'y a pas de
+// process à relancer : on bascule la connexion SQLite à chaud via db.switchDatabase (server/db.js)
+// - safe ici car il n'existe aucun cache en mémoire côté serveur qui référence l'ancienne base
+// (vérifié : aucune variable de module ne met en cache des données issues de la base).
+function sanitizeCompteFilename(name) {
+  const base = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '_').replace(/\.+$/, '');
+  return base || 'Nouveau dossier comptable';
+}
+
+app.get('/api/db/info', (req, res) => {
+  const current = db.getCurrentDbPath();
+  res.json({
+    path: current,
+    name: current ? path.basename(current, path.extname(current)) : null,
+    defaultFolder: comptesDir
+  });
+});
+
+app.get('/api/db/list', (req, res) => {
+  try {
+    const current = db.getCurrentDbPath();
+    // Basé sur le registre (server/db.js) plutôt qu'un scan de comptesDir : /api/db/new permet
+    // maintenant de sauvegarder ailleurs, donc les fichiers actifs ne vivent plus forcément tous
+    // dans ce même dossier. On filtre les entrées dont le fichier a depuis été supprimé/déplacé.
+    const files = db.getDbRegistry()
+      .filter(e => e.path && fs.existsSync(e.path))
+      .map(e => ({ path: e.path, name: e.name, folder: path.dirname(e.path), lastUsed: e.lastUsed, active: e.path === current }));
+    res.json(files);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/db/open', sensitiveLimiter, (req, res) => {
+  uploadDb.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu.' });
+
+    // Un fichier SQLite valide commence toujours par cet en-tête de 16 octets - rejet immédiat
+    // sinon, plutôt que de laisser sqlite3 échouer plus tard avec un message moins clair.
+    const header = req.file.buffer.slice(0, 16);
+    const isSqliteHeader = header.slice(0, 15).toString('ascii') === 'SQLite format 3' && header[15] === 0;
+    if (!isSqliteHeader) {
+      return res.status(400).json({ error: "Ce fichier n'est pas une base de données SQLite valide." });
+    }
+
+    try {
+      const baseName = sanitizeCompteFilename(path.basename(req.file.originalname, path.extname(req.file.originalname)));
+      let targetPath = path.join(comptesDir, `${baseName}.sqlite`);
+      let n = 1;
+      while (fs.existsSync(targetPath)) {
+        targetPath = path.join(comptesDir, `${baseName} (${n}).sqlite`);
+        n++;
+      }
+      fs.writeFileSync(targetPath, req.file.buffer);
+      await db.switchDatabase(targetPath);
+      res.json({ success: true, name: path.basename(targetPath, '.sqlite'), path: targetPath });
+    } catch (e) {
+      res.status(500).json({ error: `Impossible d'ouvrir ce fichier comptable : ${e.message}` });
+    }
+  });
+});
+
+app.post('/api/db/new', sensitiveLimiter, async (req, res) => {
+  try {
+    const baseName = sanitizeCompteFilename(req.body && req.body.name);
+    const requestedFolder = (req.body && req.body.folder || '').trim();
+
+    let targetFolder = comptesDir;
+    if (requestedFolder) {
+      if (!path.isAbsolute(requestedFolder)) {
+        return res.status(400).json({ error: "L'emplacement doit être un chemin de dossier complet (ex : C:\\Comptes\\MonEntreprise)." });
+      }
+      targetFolder = requestedFolder;
+      try {
+        fs.mkdirSync(targetFolder, { recursive: true });
+      } catch (e) {
+        return res.status(400).json({ error: `Impossible de créer/accéder à ce dossier : ${e.message}` });
+      }
+    }
+
+    const targetPath = path.join(targetFolder, `${baseName}.sqlite`);
+    if (fs.existsSync(targetPath)) {
+      return res.status(409).json({ error: `Un fichier "${baseName}.sqlite" existe déjà à cet emplacement. Choisissez un autre nom ou un autre dossier.` });
+    }
+    await db.switchDatabase(targetPath);
+    res.json({ success: true, name: baseName, path: targetPath });
+  } catch (e) {
+    res.status(500).json({ error: `Impossible de créer ce fichier comptable : ${e.message}` });
+  }
+});
+
+app.post('/api/db/switch', sensitiveLimiter, async (req, res) => {
+  try {
+    const targetPath = String((req.body && req.body.path) || '');
+    // Restreint aux chemins déjà connus (ouverts/créés via ces mêmes routes) plutôt qu'un chemin
+    // arbitraire fourni par le client, pour ne pas laisser une requête forgée pointer la connexion
+    // active vers un fichier quelconque du poste.
+    const known = db.getDbRegistry().some(e => e.path === targetPath);
+    if (!known || !fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: 'Fichier comptable introuvable ou inconnu.' });
+    }
+    await db.switchDatabase(targetPath);
+    res.json({ success: true, name: path.basename(targetPath, path.extname(targetPath)), path: targetPath });
+  } catch (e) {
+    res.status(500).json({ error: `Impossible de changer de fichier comptable : ${e.message}` });
+  }
+});
+
+app.get('/api/db/download', async (req, res) => {
+  try {
+    const current = db.getCurrentDbPath();
+    if (!current || !fs.existsSync(current)) {
+      return res.status(404).json({ error: 'Aucun fichier comptable actif.' });
+    }
+    // Purge le WAL vers le fichier principal pour que le téléchargement contienne bien les
+    // toutes dernières écritures (en mode WAL, elles peuvent encore ne vivre que dans le -wal).
+    await db.runUpdate('PRAGMA wal_checkpoint(FULL)');
+    res.download(current, path.basename(current));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- AI CHAT ROUTE ---
@@ -467,6 +624,81 @@ function expandTreasuryCounterparts(rows, journalCompteMap = new Map()) {
   return result;
 }
 
+// --- IMPORT "JOURNAL (SAGE)" ---
+// Accepte directement l'export "Impression des journaux" de Sage 100 Comptabilité, tel que
+// généré par le logiciel (menu Impressions), sans transformation manuelle préalable. Ce n'est PAS
+// un export tabulaire classique : c'est une mise en page d'IMPRESSION multi-feuilles, avec des
+// en-têtes de page répétés (numéro de série Excel du jour de tirage, nom du cabinet, "© Sage...")
+// et des sauts de page qui peuvent couper un même journal sur plusieurs feuilles consécutives.
+//
+// Le code journal n'est jamais une colonne de donnée : chaque bloc de lignes est précédé d'une
+// ligne d'en-tête portant le code et son libellé (ex: colonne E="BQUE", F="BANQUE"), repérable par
+// la présence du texte "Tenue de compte :" plus loin sur la même ligne. Les codes eux-mêmes ne
+// sont JAMAIS supposés fixes (ils varient d'un cabinet/d'une entreprise à l'autre) : on lit
+// simplement le code courant au fil de la lecture et on le mémorise jusqu'au prochain bloc,
+// puisqu'un même code peut se poursuivre sur plusieurs feuilles à la suite.
+//
+// Structure d'une ligne de donnée (colonnes 0-indexées, validée sur un export réel de 2550
+// lignes avec un total débit = total crédit à l'unité près) :
+//   0: Jour (numéro de série Excel)   1: N° pièce   2: N° compte   4: N° tiers (souvent vide)
+//   6: Libellé écriture   10: Mouvement débit   12: Mouvement crédit
+// Une ligne de donnée est reconnue par sa colonne 0 numérique (date) ET sa colonne 2 qui
+// ressemble à un numéro de compte (au moins 5 chiffres) — les lignes d'en-tête/pied de page ne
+// remplissent jamais ces deux colonnes à la fois de cette manière.
+//
+// Le "N° pièce" de Sage ne correspond pas forcément à une écriture équilibrée à lui seul (une
+// centralisation bancaire mensuelle, par exemple, n'est pas la contrepartie directe de l'écriture
+// qu'elle centralise) : on importe donc chaque ligne telle quelle, sans tenter de les regrouper en
+// pièces artificielles — l'équilibre global du fichier (vérifié plus bas, comme pour un import
+// Journal classique) est le bon niveau de contrôle.
+function parseSageJournalRows(workbook) {
+  const rows = [];
+  workbook.SheetNames.forEach(sheetName => {
+    const sheet = workbook.Sheets[sheetName];
+    const aoa = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+
+    let currentCode = null;
+
+    for (let i = 0; i < aoa.length; i++) {
+      const r = aoa[i];
+
+      if (r[9] === 'Tenue de compte :' && r[4]) {
+        currentCode = String(r[4]).trim();
+        continue;
+      }
+
+      if (!currentCode) continue;
+
+      const dateCell = r[0];
+      const compteCell = String(r[2] || '').trim();
+      const isDateLike = typeof dateCell === 'number' && dateCell > 20000 && dateCell < 80000;
+      if (!isDateLike || !/^\d{5,}/.test(compteCell)) continue;
+
+      const d = xlsx.SSF.parse_date_code(dateCell);
+      if (!d) continue;
+      const isoDate = `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
+
+      const debit = parseFloat(r[10]) || 0;
+      const credit = parseFloat(r[12]) || 0;
+      if (debit === 0 && credit === 0) continue;
+
+      rows.push({
+        code_journal: currentCode,
+        poste_budgetaire: '',
+        date: isoDate,
+        compte: compteCell,
+        compte_tiers: String(r[4] || '').trim(),
+        libelle: String(r[6] || '').trim(),
+        n_facture: '',
+        reference: String(r[1] || '').trim(),
+        debit,
+        credit
+      });
+    }
+  });
+  return rows;
+}
+
 // --- DÉDUPLICATION À L'IMPORT ---
 // Empêche qu'un même fichier (ré)importé — par erreur, ou parce qu'on ne sait plus s'il est déjà
 // passé — ne double chaque écriture en base : aucune contrainte UNIQUE n'existe sur `journal` et
@@ -486,7 +718,17 @@ function journalRowFingerprint(r) {
   ].join('||');
 }
 
-async function dedupeJournalRows(rows) {
+// `skipIntraBatchDedup` : un export système (Sage "Impression des journaux") peut légitimement
+// contenir plusieurs lignes strictement identiques au sein d'une même pièce (ex : 7 courses
+// "FRAIS D'EXPEDITION" à 1000 F chacune, même date/compte/référence, soldées par une seule ligne
+// de contrepartie à 7000 F) - rien dans les colonnes exportées ne les distingue. Sur un tel
+// fichier, comparer les lignes ENTRE ELLES (comme pour un tableur préparé à la main, où deux
+// lignes identiques trahissent presque toujours un copier-coller accidentel) supprime à tort les
+// occurrences 2 à 7, cassant l'équilibre de la pièce sans que le contrôle débit=crédit global
+// (fait AVANT dédoublonnage) ne s'en aperçoive. On continue cependant de comparer chaque ligne à
+// l'historique déjà en base (ré-import accidentel du même fichier), seule la comparaison
+// intra-fichier est désactivée pour ce cas.
+async function dedupeJournalRows(rows, { skipIntraBatchDedup = false } = {}) {
   if (!rows || rows.length === 0) return { rows: [], duplicates: 0 };
   const dates = rows.map(r => r.date).filter(Boolean).sort();
   const minDate = dates[0];
@@ -508,7 +750,7 @@ async function dedupeJournalRows(rows) {
   let duplicates = 0;
   rows.forEach(r => {
     const fp = journalRowFingerprint(r);
-    if (existingSet.has(fp) || seenInBatch.has(fp)) {
+    if (existingSet.has(fp) || (!skipIntraBatchDedup && seenInBatch.has(fp))) {
       duplicates++;
     } else {
       seenInBatch.add(fp);
@@ -579,6 +821,63 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       });
       stmt.finalize();
       res.json({ success: true, message: `${data.length} tiers importés avec succès.` });
+    } else if (type === 'journal_sage') {
+      // Export "Impression des journaux" Sage 100 Comptabilite : mise en page multi-feuilles,
+      // pas de colonnes normalisees -- voir parseSageJournalRows ci-dessus pour le detail du
+      // reperage des blocs par code journal.
+      //
+      // Contrairement a l'import "Journal" generique, on NE PASSE PAS par
+      // expandTreasuryCounterparts ici : cette heuristique complete une contrepartie de
+      // tresorerie MANQUANTE (cas d'un export qui n'a que la ligne "tiers" d'un paiement). Or
+      // l'"Impression des journaux" Sage est deja un journal complet -- chaque ecriture y a deja
+      // ses deux lignes (debit et credit), meme si elles ne sont pas toujours adjacentes dans le
+      // fichier (ex: une centralisation bancaire mensuelle regroupe plusieurs mouvements sur des
+      // dates differentes). Appliquer l'heuristique dessus ajoute des lignes en double et casse
+      // un fichier qui, tel quel, est deja rigoureusement equilibre (verifie sur un export reel :
+      // total debit = total credit a l'unite pres).
+      const finalRows = parseSageJournalRows(workbook);
+
+      const totalDebit = finalRows.reduce((s, r) => s + r.debit, 0);
+      const totalCredit = finalRows.reduce((s, r) => s + r.credit, 0);
+      if (Math.abs(totalDebit - totalCredit) > 0.01) {
+        const gap = Math.round(Math.abs(totalDebit - totalCredit));
+        return res.status(400).json({
+          error: `Fichier rejete : le total des debits (${totalDebit.toLocaleString()}) ne correspond pas au total des credits (${totalCredit.toLocaleString()}), ecart de ${gap.toLocaleString()}. Verifiez que l'export Sage est complet (toutes les feuilles/pages).`
+        });
+      }
+
+      if (finalRows.length === 0) {
+        return res.status(400).json({ error: "Aucune ecriture reconnue dans ce fichier. Verifiez qu'il s'agit bien d'un export \"Impression des journaux\" Sage 100 Comptabilite." });
+      }
+
+      const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows, { skipIntraBatchDedup: true });
+
+      try {
+        await insertJournalRowsChunked(dedupedRows);
+      } catch (err) {
+        console.error("COMMIT ERROR:", err);
+        return res.status(500).json({ error: 'Erreur lors de la sauvegarde en base.' });
+      }
+
+      let learnedCount = 0;
+      try {
+        learnedCount = await learnFromJournalData(finalRows, 2);
+      } catch (e) {
+        console.error("Erreur apprentissage ML:", e);
+      }
+      db.ensureExercicesFromJournal().catch(() => {});
+      db.run('ANALYZE', () => {});
+
+      let sageMsg = dedupedRows.length > 0
+        ? `${dedupedRows.length} ecriture(s) importee(s) avec succes depuis l'export Sage.`
+        : `Aucune nouvelle ecriture importee.`;
+      if (duplicateCount > 0) {
+        sageMsg += ` ${duplicateCount} ecriture(s) ignoree(s) car deja presente(s) en base (doublon detecte).`;
+      }
+      if (learnedCount > 0) {
+        sageMsg += ` La Memoire Metier a appris ${learnedCount} nouvelle(s) regle(s) d'imputation !`;
+      }
+      res.json({ success: true, message: sageMsg });
     } else if (type === 'journal') {
       const journalRows = [];
       data.forEach(row => {
@@ -664,6 +963,7 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       } catch (e) {
         console.error("Erreur apprentissage ML:", e);
       }
+      db.ensureExercicesFromJournal().catch(() => {});
       // Rafraîchit les statistiques du planificateur SQLite en tâche de fond (sans bloquer
       // la réponse) : un gros import change significativement la distribution des données.
       db.run('ANALYZE', () => {});
@@ -871,6 +1171,7 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
         } catch (e) {
           console.error("Erreur ML:", e);
         }
+        db.ensureExercicesFromJournal().catch(() => {});
         db.run('ANALYZE', () => {});
 
         let msg = `Génération automatique terminée : ${totalInvoices} facture(s) traitée(s), ${totalEntriesCreated} écriture(s) comptables équilibrées créées !`;
@@ -1067,6 +1368,7 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
     } catch (e) {
       console.error(e);
     }
+    db.ensureExercicesFromJournal().catch(() => {});
     db.run('ANALYZE', () => {});
 
     let dedupMsg = duplicateCount > 0
@@ -1124,6 +1426,152 @@ app.get('/api/tiers', async (req, res) => {
       ORDER BY type ASC, nom ASC
     `, [...params, ...params]);
     res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Relevé d'un tiers (son "état") : même principe que le Grand Livre par compte
+// (GET /api/grand-livre/:compte), mais le rattachement se fait par nom (compte_tiers) plutôt que
+// par numéro de compte, puisqu'un tiers n'a pas de compte de mouvement propre dans le journal.
+app.get('/api/tiers/:nom/releve', async (req, res) => {
+  try {
+    const { nom } = req.params;
+    const ex = await getActiveExercice();
+    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
+    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
+
+    const [openingRows, rows] = await Promise.all([
+      ex
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND date < ?`, [nom, ex.date_debut])
+        : Promise.resolve([{ debit: 0, credit: 0 }]),
+      db.runSelect(`
+        SELECT id, date, code_journal, compte, n_facture, reference, libelle, debit, credit
+        FROM journal
+        WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) ${exFilter}
+        ORDER BY date ASC, created_at ASC, id ASC
+      `, [nom, ...exParams]),
+    ]);
+
+    const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
+    let solde = soldeOuverture;
+    const lignes = rows.map(r => {
+      solde += (r.debit || 0) - (r.credit || 0);
+      return { ...r, solde_progressif: solde };
+    });
+
+    res.json({ nom, solde_ouverture: soldeOuverture, lignes, solde_final: solde });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Modifie le nom et/ou le compte comptable d'un tiers. `journal.compte_tiers` n'est pas une clé
+// étrangère (simple texte, voir GET /api/tiers) : renommer un tiers doit donc aussi cascader sur
+// l'historique du journal, sinon les écritures passées se détachent silencieusement du tiers
+// renommé. La fiche `tiers` elle-même peut ne pas encore exister (tiers "fantôme" reconstitué
+// depuis le journal, voir la partie UNION ALL de GET /api/tiers) : dans ce cas on la crée.
+app.put('/api/tiers/:nom', async (req, res) => {
+  try {
+    const oldNom = req.params.nom;
+    const { nom, compte_comptable, type } = req.body;
+    if (!nom || !nom.trim()) return res.status(400).json({ error: 'Nom obligatoire.' });
+    const newNom = nom.trim();
+    const renaming = newNom.toUpperCase() !== oldNom.trim().toUpperCase();
+
+    if (renaming) {
+      const collision = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [newNom]);
+      if (collision.length > 0) {
+        return res.status(409).json({ error: `Un tiers nommé "${newNom}" existe déjà. Utilisez la fusion pour les regrouper plutôt qu'un renommage.` });
+      }
+      await db.runUpdate(
+        `UPDATE journal SET compte_tiers = ?, updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?))`,
+        [newNom, oldNom]
+      );
+    }
+
+    const existing = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [oldNom]);
+    if (existing.length > 0) {
+      await db.runUpdate(
+        `UPDATE tiers SET nom=?, compte_comptable=?, type=COALESCE(?, type), updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
+        [newNom, compte_comptable || null, type || null, existing[0].id]
+      );
+    } else {
+      await db.runUpdate(
+        `INSERT INTO tiers (nom, compte_comptable, type) VALUES (?, ?, ?)`,
+        [newNom, compte_comptable || null, type || 'Client']
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Changement de compte comptable en masse pour plusieurs tiers sélectionnés (même esprit que
+// PATCH /api/journal/bulk-compte pour le Grand Livre). Un tiers sélectionné peut être "fantôme"
+// (pas encore de fiche réelle) : on la crée alors à la volée plutôt que d'échouer.
+app.patch('/api/tiers/bulk-compte', async (req, res) => {
+  try {
+    const { noms, compte_comptable } = req.body;
+    if (!Array.isArray(noms) || noms.length === 0) {
+      return res.status(400).json({ error: 'Aucun tiers sélectionné.' });
+    }
+    if (!compte_comptable || !String(compte_comptable).trim()) {
+      return res.status(400).json({ error: 'Compte obligatoire.' });
+    }
+    const compte = String(compte_comptable).trim();
+    const type = /^41/.test(compte) ? 'Client' : 'Fournisseur';
+
+    let changes = 0;
+    for (const nom of noms) {
+      const existing = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [nom]);
+      if (existing.length > 0) {
+        const r = await db.runUpdate(
+          `UPDATE tiers SET compte_comptable=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
+          [compte, existing[0].id]
+        );
+        changes += r.changes;
+      } else {
+        await db.runUpdate(`INSERT INTO tiers (nom, compte_comptable, type) VALUES (?, ?, ?)`, [String(nom).trim(), compte, type]);
+        changes += 1;
+      }
+    }
+    res.json({ success: true, changes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fusionne deux tiers : toutes les écritures historiques de `mergeNom` sont rattachées à
+// `keepNom` (rattachement textuel, voir plus haut), la fiche absorbée est supprimée, et le tiers
+// conservé se voit garantir une fiche réelle (upsert) s'il n'en avait pas encore.
+app.post('/api/tiers/merge', async (req, res) => {
+  try {
+    const { keepNom, mergeNom } = req.body;
+    if (!keepNom || !mergeNom || !keepNom.trim() || !mergeNom.trim()) {
+      return res.status(400).json({ error: 'Les deux noms de tiers sont obligatoires.' });
+    }
+    if (keepNom.trim().toUpperCase() === mergeNom.trim().toUpperCase()) {
+      return res.status(400).json({ error: 'Les deux tiers sélectionnés sont déjà identiques.' });
+    }
+
+    const result = await db.runUpdate(
+      `UPDATE journal SET compte_tiers = ?, updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?))`,
+      [keepNom.trim(), mergeNom]
+    );
+
+    await db.runUpdate(`DELETE FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [mergeNom]);
+
+    const existingKeep = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [keepNom]);
+    if (existingKeep.length === 0) {
+      await db.runUpdate(
+        `INSERT INTO tiers (nom, compte_comptable, type) VALUES (?, ?, ?)`,
+        [keepNom.trim(), req.body.compte_comptable || null, req.body.type || 'Client']
+      );
+    }
+
+    res.json({ success: true, changes: result.changes });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1204,21 +1652,84 @@ app.get('/api/journal', async (req, res) => {
   }
 });
 
+// Retourne l'éventuelle autre ligne (contrepartie) de la même écriture, si `piece_id` est
+// renseigné et qu'une autre ligne le partage. `piece_id` n'est fiable que pour la saisie manuelle
+// et l'import "factures" — la majorité des lignes importées en masse n'en ont pas (voir
+// insertJournalRowsChunked) : dans ce cas cette route renvoie simplement `null`, ce qui est
+// normal, pas une erreur (aucune contrepartie connue à proposer pour édition).
+app.get('/api/journal/:id/contrepartie', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rows = await db.runSelect('SELECT piece_id FROM journal WHERE id = ?', [id]);
+    const pieceId = rows[0] && rows[0].piece_id;
+    if (!pieceId) return res.json(null);
+
+    const siblings = await db.runSelect(
+      'SELECT id, compte, compte_tiers, libelle, debit, credit FROM journal WHERE piece_id = ? AND id != ? ORDER BY created_at ASC LIMIT 2',
+      [pieceId, id]
+    );
+    if (siblings.length !== 1) return res.json(null); // aucune, ou écriture à 3+ lignes (édition simple non adaptée)
+    res.json(siblings[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Modifie une écriture du journal (accessible depuis le Journal, ou via le lien Grand Livre -> Journal).
 // Ré-apprend la Mémoire Métier avec la nouvelle imputation (learnFromJournalData ignore déjà les
 // comptes de tiers/trésorerie/capitaux, donc sans risque même si la ligne modifiée est une contrepartie).
+//
+// `contrepartie` (optionnel, { compte, compte_tiers?, libelle? }) : si fourni, la ligne éditée doit
+// être équilibrée par une autre ligne sur ce compte. Si une contrepartie existante est déjà liée
+// (piece_id partagé), on met seulement à jour SON compte/tiers/libellé — jamais ses montants, pour
+// ne pas écraser une répartition multi-lignes légitime. Sinon, on en CRÉE une nouvelle, avec des
+// montants en miroir (débit<->crédit), et on assigne un piece_id commun aux deux lignes si la ligne
+// éditée n'en avait pas encore (cas de loin le plus fréquent sur les gros imports en masse).
 app.put('/api/journal/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit } = req.body;
+    const { code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, contrepartie } = req.body;
     if (!compte || !libelle || !date) {
       return res.status(400).json({ error: 'Compte, libellé et date sont obligatoires.' });
     }
+
+    let piece_id = null;
+    if (contrepartie && contrepartie.compte && String(contrepartie.compte).trim()) {
+      const existingRow = await db.runSelect('SELECT piece_id FROM journal WHERE id = ?', [id]);
+      piece_id = (existingRow[0] && existingRow[0].piece_id) || crypto.randomUUID();
+    }
+
     const result = await db.runUpdate(
-      `UPDATE journal SET code_journal=?, poste_budgetaire=?, date=?, compte=?, compte_tiers=?, libelle=?, n_facture=?, reference=?, debit=?, credit=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
-      [code_journal || '', poste_budgetaire || '', date, compte, compte_tiers || '', libelle, n_facture || '', reference || '', Number(debit) || 0, Number(credit) || 0, id]
+      piece_id
+        ? `UPDATE journal SET code_journal=?, poste_budgetaire=?, date=?, compte=?, compte_tiers=?, libelle=?, n_facture=?, reference=?, debit=?, credit=?, piece_id=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`
+        : `UPDATE journal SET code_journal=?, poste_budgetaire=?, date=?, compte=?, compte_tiers=?, libelle=?, n_facture=?, reference=?, debit=?, credit=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
+      piece_id
+        ? [code_journal || '', poste_budgetaire || '', date, compte, compte_tiers || '', libelle, n_facture || '', reference || '', Number(debit) || 0, Number(credit) || 0, piece_id, id]
+        : [code_journal || '', poste_budgetaire || '', date, compte, compte_tiers || '', libelle, n_facture || '', reference || '', Number(debit) || 0, Number(credit) || 0, id]
     );
     if (result.changes === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
+
+    if (piece_id) {
+      const siblings = await db.runSelect('SELECT id FROM journal WHERE piece_id = ? AND id != ? LIMIT 1', [piece_id, id]);
+      if (siblings.length > 0) {
+        await db.runUpdate(
+          `UPDATE journal SET compte=?, compte_tiers=COALESCE(?, compte_tiers), libelle=COALESCE(?, libelle), updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id=?`,
+          [contrepartie.compte.trim(), contrepartie.compte_tiers || null, contrepartie.libelle || null, siblings[0].id]
+        );
+      } else {
+        await db.runUpdate(
+          `INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            code_journal || '', poste_budgetaire || '', date, contrepartie.compte.trim(),
+            contrepartie.compte_tiers || compte_tiers || '',
+            contrepartie.libelle || `Contrepartie - ${libelle}`,
+            n_facture || '', reference || '',
+            Number(credit) || 0, Number(debit) || 0,
+            piece_id
+          ]
+        );
+      }
+    }
 
     try {
       await learnFromJournalData([{ libelle, compte, code_journal, compte_tiers }]);
@@ -1513,6 +2024,7 @@ app.post('/api/journal', (req, res) => {
         console.error(commitErr);
         return res.status(500).json({ error: commitErr.message });
       }
+      db.ensureExercicesFromJournal().catch(() => {});
       res.json({ success: true, piece_id });
     });
   });
@@ -2533,6 +3045,20 @@ function splitAndValidateSqlStatements(rawSql) {
   for (let stmt of statements) {
     // Normaliser préfixe public.table -> table
     stmt = stmt.replace(/\bpublic\.(\w+)\b/gi, '$1').trim();
+
+    // SQLite ne supporte PAS le DELETE multi-table façon MySQL/Postgres ("DELETE alias FROM table
+    // AS alias INNER JOIN (...) k ON ... WHERE ...") — erreur "near "alias": syntax error" dès le
+    // premier alias après DELETE. Le modèle génère cette forme pour des suppressions de doublons
+    // corrélées à une sous-requête (ex: garder une seule occurrence par groupe). On la réécrit vers
+    // l'équivalent SQLite valide : DELETE FROM table WHERE id IN (SELECT alias.id FROM table AS
+    // alias INNER JOIN (...) ON ... WHERE ...) — même logique de sélection des lignes, juste
+    // encapsulée dans un SELECT (que SQLite autorise avec JOIN) plutôt qu'un DELETE direct. `id`
+    // est la clé primaire de toutes les tables de cette application.
+    const mysqlDeleteJoinMatch = stmt.match(/^DELETE\s+(?!FROM\b)(\w+)\s+FROM\s+(\w+)\s+(?:AS\s+)?\1\b([\s\S]*)$/i);
+    if (mysqlDeleteJoinMatch) {
+      const [, alias, table, rest] = mysqlDeleteJoinMatch;
+      stmt = `DELETE FROM ${table} WHERE id IN (SELECT ${alias}.id FROM ${table} AS ${alias}${rest})`;
+    }
 
     // Contrairement à SELECT, SQLite exige le mot-clé AS devant un alias de table dans DELETE/UPDATE
     // ("DELETE FROM journal j WHERE ..." lève SQLITE_ERROR: near "j": syntax error) — le modèle

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
 
 // Le serveur Express (server/index.js) est chargé via require() directement dans ce processus
 // principal (voir startBackendServer ci-dessous), donc il tourne sur le même tas V8 qu'Electron.
@@ -16,7 +17,35 @@ const PORT = process.env.PORT || 3003;
 // Définir les variables d'environnement pour le backend et SQLite
 const userDataPath = app.getPath('userData');
 process.env.USER_DATA_PATH = userDataPath;
-process.env.DB_PATH = path.join(userDataPath, 'agent-ohada.sqlite');
+
+// --- Fichier comptable actif (multi-dossiers, à la Sage Saari) ---
+// Un même fichier .sqlite = un dossier comptable d'entreprise. Le chemin du fichier ACTIF est
+// mémorisé dans un petit fichier de config séparé (impossible de stocker "quel fichier ouvrir"
+// DANS le fichier qu'on doit justement d'abord localiser), lui-même dans userData — cet
+// emplacement ne change jamais, contrairement au fichier comptable qu'il désigne.
+const activeDbConfigPath = path.join(userDataPath, 'active-db-config.json');
+const defaultDbPath = path.join(userDataPath, 'agent-ohada.sqlite');
+
+function readActiveDbPath() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(activeDbConfigPath, 'utf-8'));
+    if (parsed && typeof parsed.dbPath === 'string' && parsed.dbPath.trim()) {
+      // Le fichier lui-même peut ne pas encore exister (cas "Nouveau fichier comptable" : sqlite3
+      // le crée à la première connexion) — seul le dossier parent doit être valide.
+      if (fs.existsSync(path.dirname(parsed.dbPath))) return parsed.dbPath;
+    }
+  } catch (e) {
+    // Pas de config existante (premier lancement, ou "Ouvrir"/"Nouveau" jamais utilisé) : on
+    // retombe sur le fichier par défaut, comportement inchangé.
+  }
+  return null;
+}
+
+function writeActiveDbPath(dbPath) {
+  fs.writeFileSync(activeDbConfigPath, JSON.stringify({ dbPath }, null, 2), 'utf-8');
+}
+
+process.env.DB_PATH = readActiveDbPath() || defaultDbPath;
 process.env.IS_ELECTRON = 'true';
 process.env.PORT = String(PORT);
 
@@ -52,13 +81,32 @@ function waitForServer(port, timeout = 10000) {
   });
 }
 
+// Bascule vers un autre fichier comptable : mémorise le choix puis redémarre l'application
+// entière plutôt que de rouvrir la connexion SQLite à chaud. Un redémarrage complet garantit
+// qu'aucun état/cache de l'ancien dossier (côté serveur ou côté interface) ne survit au
+// changement — plus sûr qu'une reconnexion dynamique pour un changement aussi peu fréquent.
+async function switchDatabaseFile(newPath) {
+  const confirmed = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['Annuler', 'Redémarrer'],
+    defaultId: 1,
+    cancelId: 0,
+    title: 'Changer de fichier comptable',
+    message: `L'application va redémarrer sur ce fichier comptable :\n${newPath}`
+  });
+  if (confirmed.response !== 1) return;
+  writeActiveDbPath(newPath);
+  app.relaunch();
+  app.exit(0);
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 1080,
     minHeight: 700,
-    title: 'Agent OHADA (Le-DAF) — Pilotage Financier & Comptabilité OHADA',
+    title: `Agent OHADA (Le-DAF) — ${path.basename(process.env.DB_PATH, '.sqlite')}`,
     show: false,
     backgroundColor: '#0f172a',
     autoHideMenuBar: true,
@@ -94,6 +142,37 @@ async function createWindow() {
     {
       label: 'Fichier',
       submenu: [
+        {
+          label: 'Ouvrir un fichier comptable...',
+          accelerator: 'CmdOrCtrl+O',
+          click: async () => {
+            const result = await dialog.showOpenDialog(mainWindow, {
+              title: 'Ouvrir un fichier comptable',
+              defaultPath: path.dirname(process.env.DB_PATH),
+              properties: ['openFile'],
+              filters: [
+                { name: 'Base comptable (.sqlite)', extensions: ['sqlite', 'db'] },
+                { name: 'Tous les fichiers', extensions: ['*'] }
+              ]
+            });
+            if (result.canceled || result.filePaths.length === 0) return;
+            await switchDatabaseFile(result.filePaths[0]);
+          }
+        },
+        {
+          label: 'Nouveau fichier comptable...',
+          accelerator: 'CmdOrCtrl+N',
+          click: async () => {
+            const result = await dialog.showSaveDialog(mainWindow, {
+              title: 'Créer un nouveau fichier comptable',
+              defaultPath: path.join(path.dirname(process.env.DB_PATH), 'Nouvelle entreprise.sqlite'),
+              filters: [{ name: 'Base comptable (.sqlite)', extensions: ['sqlite'] }]
+            });
+            if (result.canceled || !result.filePath) return;
+            await switchDatabaseFile(result.filePath);
+          }
+        },
+        { type: 'separator' },
         { label: 'Recharger', accelerator: 'CmdOrCtrl+R', click: () => mainWindow.reload() },
         { label: 'Plein écran', accelerator: 'F11', click: () => mainWindow.setFullScreen(!mainWindow.isFullScreen()) },
         { type: 'separator' },

@@ -37,6 +37,11 @@ dist-ssr
 *.sqlite-shm
 *.sqlite-wal
 
+# Fichier comptable actif / dossiers récents (état local par poste, jamais du code source)
+server/active-db-config.json
+server/db-registry.json
+server/public/exports/
+
 # Installer build artifacts (rebuilt locally, not source)
 installer-output/
 packaging/node-v24.15.0-win-x64/

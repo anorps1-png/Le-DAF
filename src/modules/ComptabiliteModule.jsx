@@ -2,58 +2,7 @@ import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { BrainCircuit, Table, CheckCircle, Plus, Trash2, AlertTriangle, Pencil, X, Download, RefreshCw } from 'lucide-react';
 import { getAccountLabel } from '../utils/ohadaPlan';
 import { fetchDirectSupabaseJournal, fetchDirectSupabaseTiers } from '../utils/supabaseClient';
-
-// Sélecteur de compte avec liste déroulante (n° + intitulé), filtrable en tapant : le champ reste
-// un texte libre (un compte peut être utilisé pour la première fois), la liste n'est qu'une aide.
-const AccountPicker = ({ value, onChange, accounts, style, placeholder }) => {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const q = String(value || '').trim().toLowerCase();
-  const filtered = (!q
-    ? accounts
-    : accounts.filter(a => a.compte.toLowerCase().includes(q) || a.libelle.toLowerCase().includes(q))
-  ).slice(0, 50);
-
-  return (
-    <div ref={wrapRef} style={{ position: 'relative', ...style }}>
-      <input
-        className="input"
-        style={{ padding: '0.35rem', width: '100%' }}
-        value={value || ''}
-        placeholder={placeholder || 'N° compte'}
-        onFocus={() => setOpen(true)}
-        onChange={e => { onChange(e.target.value); setOpen(true); }}
-      />
-      {open && filtered.length > 0 && (
-        <div style={{
-          position: 'absolute', top: '100%', left: 0, zIndex: 50, marginTop: '2px',
-          width: '340px', maxHeight: '260px', overflowY: 'auto', textAlign: 'left',
-          background: 'var(--color-bg, #fff)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.18)'
-        }}>
-          {filtered.map(a => (
-            <div
-              key={a.compte}
-              onMouseDown={(e) => { e.preventDefault(); onChange(a.compte); setOpen(false); }}
-              style={{ padding: '0.4rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem', borderBottom: '1px solid rgba(0,0,0,0.05)' }}
-            >
-              <strong>{a.compte}</strong> — {a.libelle}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
+import { AccountPicker } from '../components/AccountPicker';
 
 export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = {}) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'saisie');
@@ -92,6 +41,10 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   const [highlightRowId, setHighlightRowId] = useState(null);
   const [editingRowId, setEditingRowId] = useState(null);
   const [editRowForm, setEditRowForm] = useState(null);
+  // Contrepartie de la ligne en cours d'édition (voir GET/PUT /api/journal/:id/contrepartie) :
+  // { compte, compte_tiers, libelle, existingId } — existingId non-null si une contrepartie liée
+  // (même piece_id) a été trouvée et sera modifiée plutôt que dupliquée à l'enregistrement.
+  const [editContrepartie, setEditContrepartie] = useState(null);
   const [rowActionStatus, setRowActionStatus] = useState('');
   const highlightedRowRef = useRef(null);
   const [manualHeader, setManualHeader] = useState({
@@ -496,11 +449,26 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
       debit: row.debit || 0,
       credit: row.credit || 0
     });
+    setEditContrepartie({ compte: '', compte_tiers: '', libelle: '', existingId: null });
+    fetch(`/api/journal/${row.id}/contrepartie`)
+      .then(res => res.json())
+      .then(sibling => {
+        if (sibling) {
+          setEditContrepartie({
+            compte: sibling.compte || '',
+            compte_tiers: sibling.compte_tiers || '',
+            libelle: sibling.libelle || '',
+            existingId: sibling.id
+          });
+        }
+      })
+      .catch(() => {});
   };
 
   const cancelEditRow = () => {
     setEditingRowId(null);
     setEditRowForm(null);
+    setEditContrepartie(null);
   };
 
   const saveEditRow = async (id) => {
@@ -509,15 +477,24 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
       return;
     }
     try {
+      const body = { ...editRowForm };
+      if (editContrepartie && editContrepartie.compte.trim()) {
+        body.contrepartie = {
+          compte: editContrepartie.compte.trim(),
+          compte_tiers: editContrepartie.compte_tiers.trim() || undefined,
+          libelle: editContrepartie.libelle.trim() || undefined
+        };
+      }
       const res = await fetch(`/api/journal/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editRowForm)
+        body: JSON.stringify(body)
       });
       const resData = await res.json();
       if (resData.success) {
         setEditingRowId(null);
         setEditRowForm(null);
+        setEditContrepartie(null);
         setRowActionStatus('Succès : Écriture modifiée. Mémoire Métier mise à jour 🧠.');
         fetchEtats('journal');
       } else {
@@ -965,8 +942,8 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                       const isEditing = editingRowId === row.id;
                       const isHighlighted = highlightRowId === row.id || String(highlightRowId) === String(row.id);
                       return (
+                        <Fragment key={row.id || idx}>
                         <tr
-                          key={row.id || idx}
                           ref={isHighlighted ? highlightedRowRef : null}
                           style={{
                             borderBottom: '1px solid rgba(0,0,0,0.05)',
@@ -1040,6 +1017,39 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                             </>
                           )}
                         </tr>
+                        {isEditing && editContrepartie && (
+                          <tr style={{ background: 'rgba(59,130,246,0.04)', borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                            <td colSpan={10} style={{ padding: '0.5rem 0.5rem 0.75rem 1.5rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', fontSize: '0.8rem' }}>
+                                <span style={{ color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                                  ↳ Contrepartie {editContrepartie.existingId ? '(déjà liée)' : '(optionnel — laisser vide pour ne rien changer)'} :
+                                </span>
+                                <AccountPicker
+                                  value={editContrepartie.compte}
+                                  onChange={v => setEditContrepartie({ ...editContrepartie, compte: v })}
+                                  accounts={accountOptions}
+                                  style={{ width: '140px' }}
+                                  placeholder="Compte contrepartie"
+                                />
+                                <input
+                                  className="input"
+                                  style={{ padding: '0.35rem', width: '140px' }}
+                                  placeholder="Tiers (optionnel)"
+                                  value={editContrepartie.compte_tiers}
+                                  onChange={e => setEditContrepartie({ ...editContrepartie, compte_tiers: e.target.value })}
+                                />
+                                <input
+                                  className="input"
+                                  style={{ padding: '0.35rem', width: '200px' }}
+                                  placeholder="Libellé (optionnel)"
+                                  value={editContrepartie.libelle}
+                                  onChange={e => setEditContrepartie({ ...editContrepartie, libelle: e.target.value })}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
                       );
                     })
                   )}

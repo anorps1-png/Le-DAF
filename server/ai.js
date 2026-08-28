@@ -459,6 +459,36 @@ function extractProposalFromText(rawText) {
   return { text: rawText, proposal: null };
 }
 
+// Certains déploiements/modèles DeepSeek ne remplissent pas le champ structuré `tool_calls` de
+// l'API OpenAI-compatible : ils renvoient leur propre balisage interne ("DSML", tokens spéciaux
+// <｜...｜>) tel quel dans `content`. Sans traitement, ce texte brut s'affichait illisible dans le
+// chat au lieu d'être exécuté (bug remonté par l'utilisateur). On le convertit ici vers la même
+// structure `tool_calls` que l'API standard, pour qu'il soit exécuté exactement comme un appel
+// d'outil natif au lieu d'être simplement affiché ou masqué.
+function extractDsmlToolCalls(text) {
+  if (!text || !/DSML/.test(text)) return null;
+  const invokeRegex = /<｜｜DSML｜｜invoke name="([^"]+)">([\s\S]*?)<\/｜｜DSML｜｜invoke>/g;
+  const paramRegex = /<｜｜DSML｜｜parameter name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+  const calls = [];
+  let cleanedText = text;
+  let m;
+  while ((m = invokeRegex.exec(text)) !== null) {
+    const toolName = m[1];
+    const body = m[2];
+    const args = {};
+    let pm;
+    paramRegex.lastIndex = 0;
+    while ((pm = paramRegex.exec(body)) !== null) {
+      args[pm[1]] = pm[2].trim();
+    }
+    calls.push({ id: `dsml-${calls.length}`, type: 'function', function: { name: toolName, arguments: JSON.stringify(args) } });
+    cleanedText = cleanedText.split(m[0]).join('');
+  }
+  if (calls.length === 0) return null;
+  cleanedText = cleanedText.replace(/<\/?｜｜DSML｜｜tool_calls>/g, '').trim();
+  return { calls, cleanedText };
+}
+
 async function askAI(prompt, history = []) {
   const settings = await getSettings();
   const memoryContext = await getBusinessMemoryContext();
@@ -651,6 +681,15 @@ Instructions :
       }
 
       const responseMessage = completion.choices[0].message;
+
+      if ((!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) && responseMessage.content) {
+        const dsml = extractDsmlToolCalls(responseMessage.content);
+        if (dsml) {
+          responseMessage.tool_calls = dsml.calls;
+          responseMessage.content = dsml.cleanedText;
+        }
+      }
+
       messages.push(responseMessage);
 
       if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {

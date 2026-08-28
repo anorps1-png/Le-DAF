@@ -255,12 +255,21 @@ export const ImportModule = () => {
               <select className="input" value={type} onChange={e => setType(e.target.value)} style={{ width: '100%', fontSize: '0.95rem' }}>
                 <option value="factures">🧾 Saisie Automatique de Factures (Génération automatique d'écritures + ML)</option>
                 <option value="journal">Journal Comptable Général (Écritures brutes)</option>
+                <option value="journal_sage">Journal (Sage) — Export "Impression des journaux"</option>
                 <option value="tiers">Fichier Tiers (Clients / Fournisseurs)</option>
               </select>
-              
+
               {type === 'factures' && (
                 <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 'var(--radius-md)', color: '#1e40af', fontSize: '0.85rem' }}>
                   ⚡ <strong>Génération Automatique Partie Double :</strong> Chaque facture ou reçu importé générera l'écriture de Charge/Produit (via le Plan Comptable et la Mémoire Métier), la TVA (19.25%) et la contrepartie Tiers / Trésorerie équilibrée.
+                </div>
+              )}
+
+              {type === 'journal_sage' && (
+                <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 'var(--radius-md)', color: '#1e40af', fontSize: '0.85rem' }}>
+                  📘 <strong>Export Sage natif :</strong> déposez directement le fichier Excel généré par Sage 100
+                  Comptabilité (menu Impressions &gt; Impression des journaux), sans le retravailler. Les codes
+                  journaux sont lus automatiquement dans le fichier, quels qu'ils soient.
                 </div>
               )}
             </div>

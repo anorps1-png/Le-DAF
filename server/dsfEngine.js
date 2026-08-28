@@ -179,24 +179,99 @@ async function computeDSFData() {
 }
 
 // Génère et exporte le fichier Excel DSF Officiel à 74 onglets (fondé sur le template officiel DGI)
+//
+// Le chemin du template était auparavant codé en dur vers un fichier présent uniquement sur la
+// machine du développeur d'origine ("C:\Users\LA TCHAUX HOTEL\..."). Sur toute autre machine, ce
+// fichier n'existe pas : l'export retombait alors sur `xlsx.utils.book_new()`, un classeur
+// totalement VIDE (aucune des feuilles ci-dessous n'existe sur un classeur neuf, donc chaque bloc
+// `if (xxxSheet)` ci-dessous était silencieusement ignoré) — la génération "réussissait" sans
+// erreur mais produisait un fichier inexploitable. Le chemin est maintenant configurable
+// (Paramétrage IA > DSF, réglage DSF_TEMPLATE_PATH), et en son absence on génère un classeur
+// autonome entièrement rempli avec les données calculées plutôt qu'un classeur vide.
 async function generateDSFExcelWorkbook() {
-  const templatePath = "C:\\Users\\LA TCHAUX HOTEL\\Downloads\\DSF_Normal_DGIFORMAT_VERROUILLEVF.xlsx";
+  const settingsRows = await db.runSelect("SELECT value FROM settings WHERE key = 'DSF_TEMPLATE_PATH'");
+  const templatePath = (settingsRows[0] && settingsRows[0].value || '').trim();
   const dsfData = await computeDSFData();
+  const { companyInfo, bilan, resultat, tdrf, tft, controls } = dsfData;
 
-  let wb;
-  if (fs.existsSync(templatePath)) {
+  let wb = null;
+  if (templatePath && fs.existsSync(templatePath)) {
     try {
       wb = xlsx.readFile(templatePath);
     } catch (e) {
-      console.error("Error reading template Excel, fallback to new workbook:", e);
-      wb = xlsx.utils.book_new();
+      console.error("Error reading DSF template Excel, fallback to generated workbook:", e);
+      wb = null;
     }
-  } else {
-    wb = xlsx.utils.book_new();
   }
 
-  // Si le template est chargé, réinjecter les données de l'entreprise et des calculs dans les feuilles clés
-  const { companyInfo, bilan, resultat, tdrf, tft } = dsfData;
+  if (!wb) {
+    wb = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([
+      ["FICHE DSF - INFORMATIONS GÉNÉRALES"],
+      [],
+      ["Raison sociale", companyInfo.raison_sociale || ''],
+      ["Numéro d'Identifiant Unique (NIU)", companyInfo.niu || ''],
+      ["Sigle", companyInfo.sigle || ''],
+      ["Forme juridique", companyInfo.forme_juridique || ''],
+      ["Adresse", companyInfo.adresse || ''],
+      ["Téléphone", companyInfo.telephone || ''],
+      ["Email", companyInfo.email || ''],
+      ["Régime comptable", companyInfo.regime || ''],
+      ["Centre fiscal", companyInfo.centre_fiscal || ''],
+      ["Activité principale", companyInfo.activite_principale || ''],
+      ["Code NACE", companyInfo.code_nace || ''],
+      ["Exercice comptable", `${companyInfo.exercice_debut || ''} au ${companyInfo.exercice_fin || ''}`],
+      ["Signataire", `${companyInfo.signataire_nom || ''} (${companyInfo.signataire_qualite || ''})`],
+    ]), "INFORMATIONS GENERALES");
+
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([
+      ["BILAN SYSCOHADA RÉVISÉ (FCFA)"],
+      [],
+      ["ACTIF"],
+      ["Actif immobilisé net", bilan.actif.totalImmobilisationsNettes],
+      ["Actif circulant", bilan.actif.totalActifCirculant],
+      ["Trésorerie actif", bilan.actif.tresorerieActif],
+      ["TOTAL GENERAL ACTIF", bilan.actif.totalActif],
+      [],
+      ["PASSIF"],
+      ["Capitaux propres & ressources stables", bilan.passif.totalCapitauxPropres],
+      ["Passif circulant", bilan.passif.totalPassifCirculant],
+      ["Trésorerie passif", bilan.passif.tresoreriePassif],
+      ["TOTAL GENERAL PASSIF", bilan.passif.totalPassif],
+    ]), "BILAN");
+
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([
+      ["COMPTE DE RÉSULTAT SYSCOHADA (FCFA)"],
+      [],
+      ["Chiffre d'Affaires (Ventes 70)", tdrf.ca],
+      ["Achats Consommés (60)", resultat.achatsConsommes],
+      ["Marge Brute d'Exploitation", tdrf.ca - resultat.achatsConsommes],
+      ["Consommations Extérieures (61 à 65)", resultat.consommationsExternes],
+      ["Valeur Ajoutée", resultat.valeurAjoutee],
+      ["Charges de Personnel (66)", resultat.chargesPersonnel],
+      ["Excédent Brut d'Exploitation (EBE)", resultat.excedentBrutExploitation],
+      ["Dotations aux Amortissements & Provisions", resultat.dotationsExploitation],
+      ["Résultat d'Exploitation", resultat.resultatExploitation],
+      ["Impôt sur les Sociétés (IS)", tdrf.isFinal],
+      ["RÉSULTAT NET DE L'EXERCICE", tdrf.resultatNetFinal],
+    ]), "COMPTE DE RESULTAT");
+
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([
+      ["TABLEAU DES FLUX DE TRESORERIE (TFT)"],
+      [],
+      ["Flux de trésorerie provenant des activités d'exploitation", tft.fluxExploitation],
+      ["Flux de trésorerie provenant des activités d'investissement", tft.fluxInvestissement],
+      ["Flux de trésorerie provenant des activités de financement", tft.fluxFinancement],
+      ["VARIATION NETTE DE LA TRÉSORERIE DE L'EXERCICE", tft.variationTrésorerieNette],
+    ]), "TABLEAU DES FLUX DE TRESORERIE");
+
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([
+      ["ID", "Libellé", "Statut", "Écart", "Explication"],
+      ...(controls || []).map(c => [c.id, c.libelle, c.status, c.ecart, c.explication]),
+    ]), "CONTROLES DE COHERENCE");
+
+    return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  }
 
   // 1. Feuille INFORMATIONS GENERALES / PAGE DE GARDE
   const infoSheet = wb.Sheets['INFORMATIONS GENERALES'] || wb.Sheets['PAGE DE GARDE'];

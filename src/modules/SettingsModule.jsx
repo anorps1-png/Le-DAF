@@ -1,7 +1,14 @@
-import { useState, useEffect } from 'react';
-import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download, ArrowUpCircle, Laptop, ShieldCheck } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Settings, Key, CheckCircle, Save, Database, Cloud, CloudOff, RefreshCw, Download, ArrowUpCircle, Laptop, ShieldCheck, FolderOpen, FilePlus, FolderSync, AlertCircle } from 'lucide-react';
 import { getSupabaseConfig, saveSupabaseConfig } from '../utils/supabaseClient';
 import SyncProgressModal from '../components/SyncProgressModal';
+
+// La version Electron dispose déjà d'un vrai dialogue système (menu Fichier > Ouvrir/Nouveau,
+// electron/main.cjs) qui redémarre toute l'application pour garantir un état 100% propre. Cette
+// carte est l'équivalent pour la version navigateur (pas de dialogue système ni de process à
+// relancer possible depuis un onglet web) : upload/téléchargement + bascule à chaud côté serveur
+// (server/db.js, db.switchDatabase). Masquée en Electron pour ne pas dupliquer le menu natif.
+const isElectronApp = typeof window !== 'undefined' && !!(window.electronAPI && window.electronAPI.isElectron);
 
 export const SettingsModule = () => {
   const [keys, setKeys] = useState({ 
@@ -12,6 +19,18 @@ export const SettingsModule = () => {
     OPENAI_MODEL: '',
     DEFAULT_AI: 'gemini' 
   });
+
+  const [dsfTemplatePath, setDsfTemplatePath] = useState('');
+  const [savedDsf, setSavedDsf] = useState(false);
+
+  // Dossier comptable actif (version web de "Ouvrir"/"Nouveau fichier comptable...")
+  const [dbInfo, setDbInfo] = useState(null);
+  const [dbList, setDbList] = useState([]);
+  const [newDbName, setNewDbName] = useState('');
+  const [newDbFolder, setNewDbFolder] = useState('');
+  const [isDbBusy, setIsDbBusy] = useState(false);
+  const [dbActionMsg, setDbActionMsg] = useState(null);
+  const dbFileInputRef = useRef(null);
 
   const [supabaseConfig, setSupabaseConfig] = useState({
     url: '',
@@ -36,14 +55,17 @@ export const SettingsModule = () => {
   useEffect(() => {
     fetch('/api/settings')
       .then(res => res.json())
-      .then(data => setKeys({ 
-        GEMINI_API_KEY: data.GEMINI_API_KEY || '', 
-        OPENAI_API_KEY: data.OPENAI_API_KEY || '', 
-        DEEPSEEK_API_KEY: data.DEEPSEEK_API_KEY || '',
-        OPENAI_BASE_URL: data.OPENAI_BASE_URL || '',
-        OPENAI_MODEL: data.OPENAI_MODEL || '',
-        DEFAULT_AI: data.DEFAULT_AI || 'gemini' 
-      }))
+      .then(data => {
+        setKeys({
+          GEMINI_API_KEY: data.GEMINI_API_KEY || '',
+          OPENAI_API_KEY: data.OPENAI_API_KEY || '',
+          DEEPSEEK_API_KEY: data.DEEPSEEK_API_KEY || '',
+          OPENAI_BASE_URL: data.OPENAI_BASE_URL || '',
+          OPENAI_MODEL: data.OPENAI_MODEL || '',
+          DEFAULT_AI: data.DEFAULT_AI || 'gemini'
+        });
+        setDsfTemplatePath(data.DSF_TEMPLATE_PATH || '');
+      })
       .catch(e => console.error(e));
 
     fetch('/api/system/version')
@@ -52,7 +74,84 @@ export const SettingsModule = () => {
       .catch(() => {});
 
     fetchSyncStatus();
+    if (!isElectronApp) fetchDbInfo();
   }, []);
+
+  const fetchDbInfo = () => {
+    fetch('/api/db/info').then(res => res.json()).then(setDbInfo).catch(() => {});
+    fetch('/api/db/list').then(res => res.json()).then(data => setDbList(Array.isArray(data) ? data : [])).catch(() => {});
+  };
+
+  const reloadAfterDbSwitch = (successText) => {
+    setDbActionMsg({ type: 'success', text: `${successText} Rechargement de l'application...` });
+    setTimeout(() => window.location.reload(), 1200);
+  };
+
+  const handleOpenDbFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!window.confirm(`Ouvrir "${file.name}" comme dossier comptable actif ? L'application va se recharger sur ces données.`)) {
+      e.target.value = '';
+      return;
+    }
+    setIsDbBusy(true);
+    setDbActionMsg(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/db/open', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erreur à l'ouverture du fichier.");
+      reloadAfterDbSwitch(`Dossier comptable "${data.name}" ouvert.`);
+    } catch (err) {
+      setDbActionMsg({ type: 'error', text: err.message });
+      setIsDbBusy(false);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleCreateDb = async () => {
+    const name = newDbName.trim();
+    if (!name) return;
+    const folder = newDbFolder.trim();
+    const emplacementTxt = folder ? `dans "${folder}"` : `à l'emplacement par défaut`;
+    if (!window.confirm(`Créer le nouveau dossier comptable "${name}" ${emplacementTxt} (base vide, plan comptable OHADA de base) et y basculer ? L'application va se recharger.`)) return;
+    setIsDbBusy(true);
+    setDbActionMsg(null);
+    try {
+      const res = await fetch('/api/db/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, folder: folder || undefined })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur à la création du dossier comptable.');
+      reloadAfterDbSwitch(`Dossier comptable "${data.name}" créé.`);
+    } catch (err) {
+      setDbActionMsg({ type: 'error', text: err.message });
+      setIsDbBusy(false);
+    }
+  };
+
+  const handleSwitchDb = async (targetPath, name) => {
+    if (!window.confirm(`Basculer vers le dossier comptable "${name}" ? L'application va se recharger.`)) return;
+    setIsDbBusy(true);
+    setDbActionMsg(null);
+    try {
+      const res = await fetch('/api/db/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: targetPath })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur lors du changement de dossier comptable.');
+      reloadAfterDbSwitch(`Dossier comptable "${data.name}" activé.`);
+    } catch (err) {
+      setDbActionMsg({ type: 'error', text: err.message });
+      setIsDbBusy(false);
+    }
+  };
 
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true);
@@ -133,6 +232,16 @@ export const SettingsModule = () => {
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
+  };
+
+  const handleSaveDsf = async () => {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ DSF_TEMPLATE_PATH: dsfTemplatePath })
+    });
+    setSavedDsf(true);
+    setTimeout(() => setSavedDsf(false), 3000);
   };
 
   const handleSaveSupabase = async () => {
@@ -545,6 +654,149 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
           )}
         </div>
       </div>
+
+      {/* CARD : MODÈLE DSF OFFICIEL (DGI) */}
+      <div className="card">
+        <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Database style={{ color: 'var(--color-primary)' }} />
+          Modèle DSF Officiel (DGI)
+        </h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.25rem' }}>
+          Si vous disposez du fichier Excel officiel de la DSF fourni par la DGI (mise en page exacte,
+          74 onglets verrouillés), indiquez son chemin complet ci-dessous : l'export DSF y injectera
+          automatiquement vos données. Sans ce fichier, l'export génère un classeur Excel autonome
+          entièrement rempli avec les mêmes données, dans une mise en page simplifiée.
+        </p>
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Chemin du fichier modèle (.xlsx)</label>
+          <input
+            type="text"
+            className="input"
+            value={dsfTemplatePath}
+            onChange={e => setDsfTemplatePath(e.target.value)}
+            placeholder="C:\Chemin\Vers\DSF_Normal_DGIFORMAT.xlsx"
+          />
+        </div>
+        <button className="btn btn-primary" onClick={handleSaveDsf}>
+          <Save size={16} /> Sauvegarder le modèle DSF
+        </button>
+        {savedDsf && (
+          <div style={{ marginTop: '1rem', color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', fontWeight: 500 }}>
+            <CheckCircle size={16} /> Chemin du modèle DSF enregistré !
+          </div>
+        )}
+      </div>
+
+      {/* CARD : DOSSIER COMPTABLE ACTIF (multi-entreprises façon Sage Saari, version web) */}
+      {!isElectronApp && (
+        <div className="card">
+          <h3 style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FolderOpen style={{ color: 'var(--color-primary)' }} />
+            Dossier Comptable Actif
+          </h3>
+          <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.25rem' }}>
+            Chaque fichier .sqlite est un dossier comptable d'entreprise indépendant, comme dans Sage
+            Saari. Ouvrez un fichier existant, créez-en un nouveau (base vide, plan comptable OHADA de
+            base), ou basculez entre les dossiers déjà utilisés sur ce poste.
+          </p>
+
+          <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)', marginBottom: '1.25rem', fontSize: '0.85rem' }}>
+            Dossier actif : <strong>{dbInfo && dbInfo.name ? dbInfo.name : '...'}</strong>
+          </div>
+
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+            <button
+              className="btn btn-secondary"
+              disabled={isDbBusy}
+              onClick={() => dbFileInputRef.current && dbFileInputRef.current.click()}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
+            >
+              <FolderOpen size={16} /> Ouvrir un fichier comptable...
+            </button>
+            <input
+              ref={dbFileInputRef}
+              type="file"
+              accept=".sqlite,.sqlite3,.db"
+              style={{ display: 'none' }}
+              onChange={handleOpenDbFile}
+            />
+            <a
+              href="/api/db/download"
+              download
+              className="btn btn-secondary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', textDecoration: 'none' }}
+            >
+              <Download size={16} /> Télécharger le dossier actif
+            </a>
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Créer un nouveau dossier comptable</label>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+              <input
+                type="text"
+                className="input"
+                value={newDbName}
+                onChange={e => setNewDbName(e.target.value)}
+                placeholder="Nom de l'entreprise"
+                style={{ flex: 1 }}
+              />
+              <button className="btn btn-primary" onClick={handleCreateDb} disabled={isDbBusy || !newDbName.trim()}>
+                <FilePlus size={16} /> Créer
+              </button>
+            </div>
+            <input
+              type="text"
+              className="input"
+              value={newDbFolder}
+              onChange={e => setNewDbFolder(e.target.value)}
+              placeholder={dbInfo && dbInfo.defaultFolder ? `Emplacement (optionnel) - vide = ${dbInfo.defaultFolder}` : 'Emplacement (optionnel) - dossier complet, ex : C:\\Comptes\\MonEntreprise'}
+              style={{ fontSize: '0.8rem' }}
+            />
+          </div>
+
+          {dbList.length > 0 && (
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Dossiers comptables déjà utilisés sur ce poste</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                {dbList.map(f => (
+                  <div key={f.path} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: f.active ? '#ecfdf5' : '#f8fafc', border: `1px solid ${f.active ? '#a7f3d0' : 'var(--color-border)'}`, borderRadius: 'var(--radius-md)', fontSize: '0.85rem' }}>
+                    <span>
+                      {f.name} {f.active && <strong style={{ color: 'var(--color-success)' }}>(actif)</strong>}
+                      <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>{f.folder}</div>
+                    </span>
+                    {!f.active && (
+                      <button
+                        className="btn btn-secondary"
+                        disabled={isDbBusy}
+                        onClick={() => handleSwitchDb(f.path, f.name)}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+                      >
+                        <FolderSync size={14} /> Basculer
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {dbActionMsg && (
+            <div style={{
+              marginTop: '1rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              fontSize: '0.85rem',
+              fontWeight: 500,
+              color: dbActionMsg.type === 'success' ? 'var(--color-success)' : '#dc2626'
+            }}>
+              {dbActionMsg.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+              {dbActionMsg.text}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Carte Mises à jour & Multi-postes */}
       <div className="card" style={{ marginTop: '1.5rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-lg)' }}>

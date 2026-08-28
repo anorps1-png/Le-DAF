@@ -2,7 +2,15 @@ const path = require('path');
 const fs = require('fs');
 
 let sqlite3;
-let db;
+// Connexion sqlite3 réellement active. N'est JAMAIS exportée directement : le module exporte
+// `db`, un Proxy stable dont toutes les méthodes (run/all/get/serialize/prepare/...) redirigent
+// vers `rawDb` À CHAQUE APPEL (pas une capture figée au chargement du module). Ça permet de
+// changer de fichier .sqlite actif à chaud (multi-dossiers façon Sage Saari, cf. switchDatabase
+// ci-dessous) sans redémarrer le process Node : tous les fichiers qui font
+// `const db = require('./db')` gardent la même référence `db` pour toujours, seule la connexion
+// pointée en coulisse change.
+let rawDb;
+let currentDbPath = null;
 
 // Génère un UUID v4 directement en SQL (DEFAULT de colonne, ou dans un INSERT...SELECT lors
 // d'une migration). Choisi plutôt que crypto.randomUUID() côté JS pour que même le SQL brut
@@ -10,40 +18,152 @@ let db;
 // fonctionner sans modification : SQLite fournit automatiquement un id valide à l'insertion.
 const UUID_DEFAULT_SQL = "(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)),2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))))";
 
+const dbTarget = {};
+const db = new Proxy(dbTarget, {
+  get(target, prop, receiver) {
+    if (prop in target) return Reflect.get(target, prop, receiver);
+    const val = rawDb ? rawDb[prop] : undefined;
+    if (typeof val === 'function') {
+      return function (...args) { return val.apply(rawDb, args); };
+    }
+    return val;
+  },
+  set(target, prop, value) {
+    target[prop] = value;
+    return true;
+  }
+});
+
+// Emplacement du pointeur "fichier comptable actif" côté web (routes /api/db/*). En Electron,
+// process.env.DB_PATH est TOUJOURS fixé explicitement par electron/main.cjs avant de charger ce
+// module (lui-même lu depuis userData/active-db-config.json) : la branche ci-dessous n'est donc
+// jamais atteinte dans ce cas, et ce même fichier reste cohérent entre les deux mécanismes
+// (menu natif Electron et upload web) quand USER_DATA_PATH est défini.
+function activeDbConfigPath() {
+  const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+  if (isVercel) return null; // /tmp non persistant entre invocations, inutile de mémoriser
+  const dir = process.env.USER_DATA_PATH || __dirname;
+  return path.join(dir, 'active-db-config.json');
+}
+
+// Registre des dossiers comptables déjà ouverts/créés (peu importe leur dossier réel sur disque,
+// maintenant que /api/db/new permet d'en choisir un arbitraire) : liste-y le nom d'affichage pour
+// la bascule rapide côté web (/api/db/list, /api/db/switch), sans avoir à scanner un dossier fixe.
+function registryPath() {
+  const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+  if (isVercel) return null;
+  const dir = process.env.USER_DATA_PATH || __dirname;
+  return path.join(dir, 'db-registry.json');
+}
+
+function loadRegistry() {
+  try {
+    const p = registryPath();
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function upsertRegistry(dbPath) {
+  try {
+    const p = registryPath();
+    if (!p) return;
+    let list = loadRegistry().filter(e => e.path !== dbPath);
+    list.unshift({ path: dbPath, name: path.basename(dbPath, path.extname(dbPath)), lastUsed: new Date().toISOString() });
+    list = list.slice(0, 30); // évite une croissance illimitée sur un usage au long cours
+    fs.writeFileSync(p, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (e) {
+    // Non bloquant, cf. commentaire équivalent dans switchDatabase
+  }
+}
+
+function resolveDefaultDbPath() {
+  const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+  if (process.env.DB_PATH) return process.env.DB_PATH;
+  if (isVercel) return path.join('/tmp', 'agent-ohada.sqlite');
+  try {
+    const cfgPath = activeDbConfigPath();
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    if (parsed && typeof parsed.dbPath === 'string' && parsed.dbPath.trim() && fs.existsSync(path.dirname(parsed.dbPath))) {
+      return parsed.dbPath;
+    }
+  } catch (e) {
+    // Pas de config existante (premier lancement, ou jamais changé de fichier comptable côté
+    // web) : on retombe sur le fichier par défaut, comportement inchangé.
+  }
+  return path.resolve(__dirname, 'agent-ohada.sqlite');
+}
+
+function openConnection(dbPath) {
+  return new Promise((resolve, reject) => {
+    const dbDir = path.dirname(dbPath);
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    const instance = new sqlite3.Database(dbPath, (err) => {
+      if (err) { reject(err); return; }
+      // Activer le mode WAL et optimisations de performance SQLite (ultra rapide)
+      instance.configure("busyTimeout", 30000);
+      instance.run("PRAGMA busy_timeout = 30000;");
+      instance.run("PRAGMA journal_mode = WAL;");
+      instance.run("PRAGMA synchronous = NORMAL;");
+      instance.run("PRAGMA temp_store = MEMORY;");
+      instance.run("PRAGMA cache_size = -64000;"); // 64MB cache
+      resolve(instance);
+    });
+  });
+}
+
+// Bascule la connexion active vers un autre fichier .sqlite (ouverture d'un autre dossier
+// comptable, ou création d'un nouveau vide) : ouvre la nouvelle connexion, (ré)applique le
+// schéma dessus (no-op sur les tables déjà présentes, migrations auto-détectées sinon), puis
+// seulement ensuite ferme l'ancienne connexion - jamais l'inverse, pour ne pas laisser `db`
+// sans connexion valide si l'ouverture du nouveau fichier échoue.
+async function switchDatabase(newPath) {
+  // path.resolve normalise aussi bien les séparateurs (/ vs \) que les chemins relatifs, pour que
+  // currentDbPath/le registre restent comparables par simple égalité de chaîne peu importe
+  // comment le chemin d'origine a été fourni (DB_PATH avec des "/", chemin construit par
+  // path.join avec des "\", etc.) - sans ça, un même fichier pouvait apparaître comme "inconnu"
+  // lors d'un /api/db/switch juste à cause d'un style de séparateur différent.
+  newPath = path.resolve(newPath);
+  const newConn = await openConnection(newPath);
+  const old = rawDb;
+  rawDb = newConn;
+  currentDbPath = newPath;
+  await initSchema();
+  if (old && typeof old.close === 'function') {
+    old.close(() => {});
+  }
+  try {
+    const cfgPath = activeDbConfigPath();
+    if (cfgPath) fs.writeFileSync(cfgPath, JSON.stringify({ dbPath: newPath }, null, 2), 'utf-8');
+  } catch (e) {
+    // Non bloquant : la bascule elle-même a réussi, seule la mémorisation pour un futur
+    // redémarrage échoue (filesystem restreint) - sans conséquence sur la session en cours.
+  }
+  upsertRegistry(newPath);
+  return { dbPath: newPath };
+}
+
 try {
   sqlite3 = require('sqlite3').verbose();
-  const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
-  const dbPath = process.env.DB_PATH
-    ? process.env.DB_PATH
-    : isVercel
-    ? path.join('/tmp', 'agent-ohada.sqlite')
-    : path.resolve(__dirname, 'agent-ohada.sqlite');
-
-  const dbDir = path.dirname(dbPath);
-  if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-  }
-
-  db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-      console.error('Error opening database', err.message);
-    } else {
-      console.log('Connected to the SQLite database.');
-
-      // Activer le mode WAL et optimisations de performance SQLite (ultra rapide)
-      db.configure("busyTimeout", 30000);
-      db.run("PRAGMA busy_timeout = 30000;");
-      db.run("PRAGMA journal_mode = WAL;");
-      db.run("PRAGMA synchronous = NORMAL;");
-      db.run("PRAGMA temp_store = MEMORY;");
-      db.run("PRAGMA cache_size = -64000;"); // 64MB cache
-
-      initSchema().catch(err => console.error('Erreur d\'initialisation du schéma :', err));
+  const dbPath = path.resolve(resolveDefaultDbPath());
+  openConnection(dbPath).then(async (instance) => {
+    rawDb = instance;
+    currentDbPath = dbPath;
+    console.log('Connected to the SQLite database.');
+    try {
+      await initSchema();
+    } catch (err) {
+      console.error('Erreur d\'initialisation du schéma :', err);
     }
-  });
+    upsertRegistry(dbPath);
+  }).catch(err => console.error('Error opening database', err.message));
 } catch (e) {
   console.warn("sqlite3 native binary not available on this platform (Serverless Vercel fallback active).", e.message);
-  db = {
+  rawDb = {
     serialize: (cb) => cb && cb(),
     run: function(sql, params, cb) {
       if (typeof params === 'function') cb = params;
@@ -93,6 +213,31 @@ async function columnType(table, column) {
 async function tableExists(table) {
   const rows = await all(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, [table]);
   return rows.length > 0;
+}
+
+// Crée automatiquement un exercice comptable (01/01/N au 31/12/N) pour chaque année civile déjà
+// présente dans le journal mais non encore couverte par un exercice existant - l'utilisateur n'a
+// plus besoin d'en créer manuellement avant de pouvoir filtrer/consulter par exercice. Idempotent
+// (ne recrée jamais un exercice déjà couvert) donc sans risque à ré-exécuter à chaque démarrage,
+// bascule de dossier comptable, ou import.
+async function ensureExercicesFromJournal() {
+  if (!(await tableExists('journal')) || !(await tableExists('exercices'))) return;
+  const years = await all(`
+    SELECT DISTINCT substr(date, 1, 4) AS year FROM journal
+    WHERE date IS NOT NULL AND length(date) >= 4
+  `);
+  if (!years.length) return;
+  const existing = await all(`SELECT date_debut, date_fin FROM exercices`);
+  for (const { year } of years) {
+    if (!/^\d{4}$/.test(year)) continue;
+    const dateDebut = `${year}-01-01`;
+    const dateFin = `${year}-12-31`;
+    const covered = existing.some(e => e.date_debut <= dateDebut && e.date_fin >= dateFin);
+    if (!covered) {
+      await run(`INSERT INTO exercices (libelle, date_debut, date_fin) VALUES (?, ?, ?)`, [`Exercice ${year}`, dateDebut, dateFin]);
+      existing.push({ date_debut: dateDebut, date_fin: dateFin });
+    }
+  }
 }
 
 // =========================================================================
@@ -322,6 +467,16 @@ async function initSchema() {
 
   // Settings Table (for API Keys)
   await run(`CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`);
+
+  // Informations d'en-tête de l'entreprise pour la DSF (raison sociale, NIU, régime...). Référencée
+  // par dsfEngine.js (getCompanyInfo/saveCompanyInfo) mais jamais créée jusqu'ici : les sauvegardes
+  // via /api/dsf/info échouaient silencieusement (db.runUpdate avale les erreurs SQL), si bien que
+  // la DSF générée affichait toujours les valeurs d'exemple codées en dur au lieu des vraies
+  // informations saisies par l'utilisateur.
+  await run(`CREATE TABLE IF NOT EXISTS company_info (
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
@@ -594,6 +749,8 @@ async function initSchema() {
     await run("INSERT OR IGNORE INTO settings (key, value) VALUES ('SUPABASE_AUTO_SYNC', '1')");
   }
 
+  await ensureExercicesFromJournal();
+
   console.log('[DB] Schéma prêt.');
 
   // ANALYZE (statistiques du planificateur de requêtes) en tâche de fond, sans bloquer le
@@ -646,5 +803,10 @@ db.runGet = function (sql, params = []) {
     });
   });
 };
+
+db.switchDatabase = switchDatabase;
+db.getCurrentDbPath = () => currentDbPath;
+db.getDbRegistry = () => loadRegistry();
+db.ensureExercicesFromJournal = ensureExercicesFromJournal;
 
 module.exports = db;
