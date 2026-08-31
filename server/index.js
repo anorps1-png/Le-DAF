@@ -191,13 +191,32 @@ async function getBalanceRows(dateDebutOverride, dateFinOverride) {
   const dateDebut = hasOverride ? dateDebutOverride : (ex && ex.date_debut);
   const dateFin = hasOverride ? dateFinOverride : (ex && ex.date_fin);
 
-  const [openingRows, periodRows, allTimeLabels] = await Promise.all([
+  // Solde antérieur : uniquement pour les comptes de bilan / situation (classes 1 à 5), qui sont
+  // patrimoniaux et se reportent d'un exercice à l'autre. Les comptes de gestion (charges 6,
+  // produits 7, HAO 8) sont soldés à chaque clôture (leur différence devient le résultat, viré en
+  // classe 13 puis 11) : ils repartent obligatoirement à 0 au 1er jour de l'exercice, quelle que
+  // soit leur activité avant cette date (cf. server/ohadaRules.js, même distinction
+  // "comptes de situation classes 1-5" / "comptes de gestion classes 6, 7, 8").
+  // À Nouveaux (RAN) : à la migration d'un exercice vers le suivant, Sage (et la pratique
+  // comptable en général) matérialise le solde d'ouverture de chaque compte de bilan par une
+  // véritable écriture sur un journal dédié "RAN", datée au tout début du nouvel exercice — ce
+  // N'EST PAS un mouvement de la période, c'est la représentation du solde antérieur lui-même.
+  // Sans traitement particulier, cette écriture se retrouve comptée deux fois dans la Balance :
+  // une fois via solde_anterieur (reconstitué depuis l'historique < dateDebut, quand il existe),
+  // et une seconde fois via total_debit/total_credit puisque sa date tombe dans la période
+  // affichée. Quand un RAN existe pour un compte, il fait foi et REMPLACE le calcul historique
+  // (comportement Sage : le solde antérieur d'un exercice vient de son propre RAN, pas d'une
+  // ré-agrégation de tout l'historique) ; il est donc aussi exclu des mouvements de période.
+  const [openingRows, periodRows, ranRows, allTimeLabels] = await Promise.all([
     dateDebut
-      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date < ? GROUP BY compte`, [dateDebut])
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date < ? AND compte NOT LIKE '6%' AND compte NOT LIKE '7%' AND compte NOT LIKE '8%' GROUP BY compte`, [dateDebut])
       : Promise.resolve([]),
     (dateDebut && dateFin)
-      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? GROUP BY compte`, [dateDebut, dateFin])
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? AND UPPER(TRIM(code_journal)) != 'RAN' GROUP BY compte`, [dateDebut, dateFin])
       : db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal GROUP BY compte`),
+    (dateDebut && dateFin)
+      ? db.runSelect(`SELECT compte, SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE date >= ? AND date <= ? AND UPPER(TRIM(code_journal)) = 'RAN' GROUP BY compte`, [dateDebut, dateFin])
+      : Promise.resolve([]),
     db.runSelect(`SELECT compte, MAX(libelle) as intitule FROM journal GROUP BY compte`),
   ]);
 
@@ -206,6 +225,12 @@ async function getBalanceRows(dateDebutOverride, dateFinOverride) {
 
   openingRows.forEach(r => {
     byCompte.set(r.compte, { compte: r.compte, solde_anterieur: (r.debit || 0) - (r.credit || 0), total_debit: 0, total_credit: 0 });
+  });
+  // Le RAN, quand il existe pour ce compte, prime sur le solde antérieur reconstitué ci-dessus.
+  ranRows.forEach(r => {
+    const entry = byCompte.get(r.compte) || { compte: r.compte, solde_anterieur: 0, total_debit: 0, total_credit: 0 };
+    entry.solde_anterieur = (r.debit || 0) - (r.credit || 0);
+    byCompte.set(r.compte, entry);
   });
   periodRows.forEach(r => {
     const entry = byCompte.get(r.compte) || { compte: r.compte, solde_anterieur: 0, total_debit: 0, total_credit: 0 };
@@ -2103,8 +2128,8 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // Le résultat net calculé depuis les comptes de gestion (classes 6/7/8) est injecté dans les
 // capitaux propres du bilan plutôt que d'utiliser le solde du compte 13 (qui ne porte le résultat
 // qu'après une écriture de clôture), pour que le bilan s'équilibre réellement en cours d'exercice.
-function computeFinancials(rows) {
-  const { bilan, resultat, comptesNonClasses } = computeEtatsFinanciers(rows);
+function computeFinancials(rows, ranResultatRows = []) {
+  const { bilan, resultat, comptesNonClasses } = computeEtatsFinanciers(rows, ranResultatRows);
   const { actif, passif } = bilan;
 
   // Agrégats "à plat" conservés pour la compatibilité de /api/financial-analysis (ratios,
@@ -2141,48 +2166,67 @@ function computeFinancials(rows) {
   };
 }
 
+// Retourne { rows, ranResultatRows } : rows = balance agrégée par compte pour l'exercice actif
+// (comportement inchangé) ; ranResultatRows = les lignes de compte 13 spécifiquement portées par
+// le journal RAN (À Nouveaux), à transmettre telles quelles à computeEtatsFinanciers pour qu'un
+// résultat antérieur non affecté, reporté à l'ouverture, soit compté dans les capitaux propres au
+// lieu d'être silencieusement ignoré (cf. server/ohadaRules.js).
 async function getFinancialRows() {
   try {
     const supabase = await getSupabaseClient();
     if (supabase) {
       const ex = await getActiveExercice();
-      let query = supabase.from('journal').select('compte, debit, credit');
+      let query = supabase.from('journal').select('compte, debit, credit, code_journal');
       if (ex) {
         query = query.gte('date', ex.date_debut).lte('date', ex.date_fin);
       }
       const { data, error } = await query;
       if (!error && Array.isArray(data) && data.length > 0) {
         const accMap = {};
+        const ranMap = {};
         data.forEach(r => {
           const c = r.compte || '0';
           if (!accMap[c]) accMap[c] = { compte: c, total_debit: 0, total_credit: 0 };
           accMap[c].total_debit += (parseFloat(r.debit) || 0);
           accMap[c].total_credit += (parseFloat(r.credit) || 0);
+          if (c.startsWith('13') && String(r.code_journal || '').trim().toUpperCase() === 'RAN') {
+            if (!ranMap[c]) ranMap[c] = { compte: c, debit: 0, credit: 0 };
+            ranMap[c].debit += (parseFloat(r.debit) || 0);
+            ranMap[c].credit += (parseFloat(r.credit) || 0);
+          }
         });
-        return Object.values(accMap);
+        return { rows: Object.values(accMap), ranResultatRows: Object.values(ranMap) };
       }
     }
   } catch (e) {}
 
   try {
     const { clause, params } = await getExerciceDateFilter();
-    const rows = await db.runSelect(`
-      SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
-      FROM journal
-      ${clause ? `WHERE ${clause}` : ''}
-      GROUP BY compte
-    `, params);
-    return Array.isArray(rows) ? rows : [];
+    const [rows, ranResultatRows] = await Promise.all([
+      db.runSelect(`
+        SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
+        FROM journal
+        ${clause ? `WHERE ${clause}` : ''}
+        GROUP BY compte
+      `, params),
+      db.runSelect(`
+        SELECT compte, SUM(debit) as debit, SUM(credit) as credit
+        FROM journal
+        WHERE compte LIKE '13%' AND UPPER(TRIM(code_journal)) = 'RAN' ${clause ? `AND ${clause}` : ''}
+        GROUP BY compte
+      `, params),
+    ]);
+    return { rows: Array.isArray(rows) ? rows : [], ranResultatRows: Array.isArray(ranResultatRows) ? ranResultatRows : [] };
   } catch (err) {
-    return [];
+    return { rows: [], ranResultatRows: [] };
   }
 }
 
 // --- MODULE D'ANALYSE FINANCIÈRE COMPLÈTE & INDICATEURS KPI SYSCOHADA ---
 app.get('/api/financial-analysis', async (req, res) => {
   try {
-    const rows = await getFinancialRows();
-    const fin = computeFinancials(rows || []);
+    const { rows, ranResultatRows } = await getFinancialRows();
+    const fin = computeFinancials(rows || [], ranResultatRows);
     const capPermanents = fin.capitauxPropres + fin.resultatNet;
 
     // Ratios
@@ -2258,8 +2302,8 @@ app.get('/api/balance', async (req, res) => {
 
 app.get('/api/bilan', async (req, res) => {
   try {
-    const rows = await getFinancialRows();
-    const { bilan, comptesNonClasses } = computeEtatsFinanciers(rows);
+    const { rows, ranResultatRows } = await getFinancialRows();
+    const { bilan, comptesNonClasses } = computeEtatsFinanciers(rows, ranResultatRows);
     res.json({ ...bilan, comptesNonClasses });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2268,7 +2312,7 @@ app.get('/api/bilan', async (req, res) => {
 
 app.get('/api/resultat', async (req, res) => {
   try {
-    const rows = await getFinancialRows();
+    const { rows } = await getFinancialRows();
     const { resultat, comptesNonClasses } = computeEtatsFinanciers(rows);
     res.json({ ...resultat, comptesNonClasses });
   } catch (err) {
@@ -2369,6 +2413,13 @@ app.get('/api/export/etats-financiers', async (req, res) => {
   try {
     const type = req.query.type || 'pack'; // 'pack', 'bilan', 'resultat', 'balance', 'journal'
     const format = (req.query.format || 'excel').toLowerCase(); // 'excel' ou 'pdf'
+
+    // Un type non reconnu (ex: un onglet qui n'a pas son propre export ici, comme DSF/Lettrage/
+    // Rapprochement) ne construit aucune feuille : mieux vaut un message clair qu'un classeur vide
+    // qui plante xlsx.write avec "Workbook is empty".
+    if (!['pack', 'bilan', 'resultat', 'balance', 'journal'].includes(type)) {
+      return res.status(400).json({ error: `Export non disponible pour "${type}".` });
+    }
     const searchParam = String(req.query.search || req.query.compte || '').trim().toLowerCase();
     const classeParam = String(req.query.classe || '').trim();
     // Doit refléter le même bouton "Toutes les dates" que l'onglet Journal (voir /api/journal) :
@@ -2397,6 +2448,15 @@ app.get('/api/export/etats-financiers', async (req, res) => {
       ${balanceClauseOverride.clause ? `WHERE ${balanceClauseOverride.clause}` : ''}
       GROUP BY compte
       ORDER BY compte ASC
+    `, balanceClauseOverride.params);
+
+    // Résultat non affecté reporté par le journal RAN (À Nouveaux) sur le compte 13, même
+    // portée temporelle que rawBalanceRows ci-dessus : cf. server/ohadaRules.js.
+    const ranResultatRows = await db.runSelect(`
+      SELECT compte, SUM(debit) as debit, SUM(credit) as credit
+      FROM journal
+      WHERE compte LIKE '13%' AND UPPER(TRIM(code_journal)) = 'RAN' ${balanceClauseOverride.clause ? `AND ${balanceClauseOverride.clause}` : ''}
+      GROUP BY compte
     `, balanceClauseOverride.params);
 
     let rawJournalRows = await db.runSelect(`
@@ -2428,7 +2488,7 @@ app.get('/api/export/etats-financiers', async (req, res) => {
       return haystack.includes(searchParam);
     });
 
-    const { bilan, resultat } = computeEtatsFinanciers(rawBalanceRows);
+    const { bilan, resultat } = computeEtatsFinanciers(rawBalanceRows, ranResultatRows);
 
     // --- PDF EXPORT OPTION (FORMATTED ACCOUNTING TABLES) ---
     if (format === 'pdf') {
@@ -3746,7 +3806,8 @@ app.get('/api/sync/schema-script', (req, res) => {
   }
 });
 
-const { computeDSFData, saveCompanyInfo, generateDSFExcelWorkbook } = require('./dsfEngine');
+const { computeDSFData, saveCompanyInfo, generateDSFExcelWorkbook, getExerciceDateFilter: getDsfExerciceDateFilter, setDsfIsSource, setDsfIsRate } = require('./dsfEngine');
+const { convertXlsxBufferToPdf } = require('./pdfConvert');
 
 // --- ROUTES DSF OHADA ---
 app.get('/api/dsf/data', async (req, res) => {
@@ -3767,14 +3828,51 @@ app.post('/api/dsf/info', async (req, res) => {
   }
 });
 
+// Choix de la source de l'IS pour le TDRF de l'exercice actif : 'theorique' (calcul 27,5% /
+// minimum de perception, comportement par défaut) ou 'reel' (utilise l'écriture réellement
+// comptabilisée sur le compte 89, quand elle existe). Voir dsfEngine.js pour le détail.
+app.post('/api/dsf/is-source', async (req, res) => {
+  try {
+    const source = req.body && req.body.source === 'reel' ? 'reel' : 'theorique';
+    const { exerciceId } = await getDsfExerciceDateFilter();
+    await setDsfIsSource(exerciceId, source);
+    const data = await computeDSFData();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Taux d'IS utilisé par le calcul théorique (global, la loi fiscale change dans le temps) — voir
+// dsfEngine.js. Distinct de is-source : ceci change LE calcul théorique lui-même, pas quelle
+// source (théorique/réel) le TDRF retient.
+app.post('/api/dsf/is-rate', async (req, res) => {
+  try {
+    await setDsfIsRate(req.body && req.body.rate);
+    const data = await computeDSFData();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/export/dsf', async (req, res) => {
   try {
     const format = (req.query.format || 'excel').toLowerCase();
+    const excelBuffer = await generateDSFExcelWorkbook();
+
     if (format === 'pdf') {
-      return res.redirect('/api/export/etats-financiers?type=pack&format=pdf');
+      try {
+        const pdfBuffer = await convertXlsxBufferToPdf(excelBuffer);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename="DSF_SYSCOHADA_DGI_OFFICIEL.pdf"');
+        return res.send(pdfBuffer);
+      } catch (pdfErr) {
+        console.error("Error converting DSF to PDF:", pdfErr);
+        return res.status(500).json({ error: pdfErr.message || "Erreur lors de la génération du PDF de la DSF." });
+      }
     }
 
-    const excelBuffer = await generateDSFExcelWorkbook();
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="DSF_SYSCOHADA_DGI_OFFICIEL.xlsx"');
     res.send(excelBuffer);

@@ -50,3 +50,7 @@ packaging/node-portable.zip
 packaging/*.log
 packaging/*.flag
 
+# LibreOffice portable (conversion PDF de la DSF) : binaire volumineux, jamais versionné,
+# déposé manuellement en local pour empaqueter l'installateur (voir server/pdfConvert.js)
+packaging/libreoffice-portable/
+

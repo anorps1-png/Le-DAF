@@ -104,12 +104,16 @@ const RESULTAT_RULES = [
   { prefix: '781', category: 'AUTRES_PRODUITS_EXPLOITATION' },
   { prefix: '78', category: 'AUTRES_PRODUITS_EXPLOITATION' }, // autres transferts de charges
 
-  // Consommations intermédiaires (61 à 65) — avant l'Excédent Brut d'Exploitation
-  { prefix: '61', category: 'CONSOMMATIONS_EXTERNES' },
-  { prefix: '62', category: 'CONSOMMATIONS_EXTERNES' },
-  { prefix: '63', category: 'CONSOMMATIONS_EXTERNES' },
-  { prefix: '64', category: 'CONSOMMATIONS_EXTERNES' },
-  { prefix: '65', category: 'CONSOMMATIONS_EXTERNES' },
+  // Consommations intermédiaires (61 à 65) — avant l'Excédent Brut d'Exploitation. Détaillées par
+  // sous-classe (au lieu d'un seul bloc CONSOMMATIONS_EXTERNES) pour correspondre aux lignes
+  // RG/RH/RI/RJ du Compte de Résultat SYSCOHADA officiel (transports / services extérieurs /
+  // impôts et taxes / autres charges), tout en gardant leur somme disponible pour la Valeur
+  // Ajoutée (voir consommationsExternes = somme des 4 dans le résultat retourné ci-dessous).
+  { prefix: '61', category: 'TRANSPORTS' },
+  { prefix: '62', category: 'SERVICES_EXTERIEURS' },
+  { prefix: '63', category: 'SERVICES_EXTERIEURS' },
+  { prefix: '64', category: 'IMPOTS_TAXES' },
+  { prefix: '65', category: 'AUTRES_CHARGES_GESTION' },
 
   // Charges de personnel
   { prefix: '66', category: 'CHARGES_PERSONNEL' },
@@ -170,8 +174,15 @@ function classifyResultat(compte) {
 // (compte, total_debit, total_credit). Ne connaît rien du plan comptable propre à l'entreprise :
 // seule la racine numérique du compte compte. Aucune catégorie ne "disparaît" silencieusement —
 // tout compte non reconnu par les deux classifications est renvoyé dans `comptesNonClasses`.
-// ---------------------------------------------------------------------------------------------
-function computeEtatsFinanciers(rows) {
+//
+// ranResultatRows (optionnel) : lignes de compte 13 "Résultat net de l'exercice" provenant
+// spécifiquement d'une écriture À Nouveau (journal RAN) — c'est-à-dire le résultat non affecté
+// d'un exercice antérieur, reporté tel quel à l'ouverture de celui-ci. Un compte 13 alimenté par
+// tout AUTRE journal reste ignoré par BILAN_RULES (RESULTAT_NET_BILAN ci-dessous) : ce serait une
+// écriture de clôture de l'exercice EN COURS, qui doublonnerait le résultat déjà recalculé depuis
+// les classes 6/7/8. Seul un RAN représente un vrai élément de capitaux propres d'ouverture ; il
+// est donc traité ici comme un report à nouveau (même masse, même ligne d'affichage).
+function computeEtatsFinanciers(rows, ranResultatRows = []) {
   const b = {
     // valeurs brutes accumulées par catégorie, avant mise en forme
     capital: 0, reserves: 0, reportANouveau: 0, subventionsInvestissement: 0, provisionsReglementees: 0,
@@ -190,7 +201,9 @@ function computeEtatsFinanciers(rows) {
   const r = {
     achatsMarchandises: 0, variationStockMarchandises: 0, ventesMarchandises: 0,
     chiffreAffairesAutre: 0, achatsConsommes: 0,
-    autresProduitsExploitation: 0, consommationsExternes: 0, chargesPersonnel: 0,
+    autresProduitsExploitation: 0,
+    transports: 0, servicesExterieurs: 0, impotsTaxes: 0, autresChargesGestion: 0,
+    chargesPersonnel: 0,
     dotationsExploitation: 0, reprisesExploitation: 0,
     chargesFinancieres: 0, produitsFinancieres: 0,
     chargesHAO: 0, produitsHAO: 0,
@@ -275,7 +288,10 @@ function computeEtatsFinanciers(rows) {
         case 'CHIFFRE_AFFAIRES_AUTRE': r.chiffreAffairesAutre += netCred; break;
         case 'ACHATS_CONSOMMES': r.achatsConsommes += netDeb; break;
         case 'AUTRES_PRODUITS_EXPLOITATION': r.autresProduitsExploitation += netCred; break;
-        case 'CONSOMMATIONS_EXTERNES': r.consommationsExternes += netDeb; break;
+        case 'TRANSPORTS': r.transports += netDeb; break;
+        case 'SERVICES_EXTERIEURS': r.servicesExterieurs += netDeb; break;
+        case 'IMPOTS_TAXES': r.impotsTaxes += netDeb; break;
+        case 'AUTRES_CHARGES_GESTION': r.autresChargesGestion += netDeb; break;
         case 'CHARGES_PERSONNEL': r.chargesPersonnel += netDeb; break;
         case 'DOTATIONS_EXPLOITATION': r.dotationsExploitation += netDeb; break;
         case 'REPRISES_EXPLOITATION': r.reprisesExploitation += netCred; break;
@@ -294,6 +310,14 @@ function computeEtatsFinanciers(rows) {
     }
   });
 
+  (ranResultatRows || []).forEach(row => {
+    const compte = String(row.compte || '');
+    const debit = row.debit || 0;
+    const credit = row.credit || 0;
+    b.reportANouveau += credit - debit;
+    pushDetail('reportANouveau', compte, debit, credit);
+  });
+
   // --- Compte de résultat : cascade Partie 3 §3.2 ---
   // Chaque compte n'est classé que sous UNE seule catégorie (préfixe le plus spécifique) : 601 et
   // 6031 tombent dans ACHATS_MARCHANDISES / VARIATION_STOCK_MARCHANDISES (pour la marge
@@ -304,7 +328,8 @@ function computeEtatsFinanciers(rows) {
   const achatsConsommesTotal = r.achatsMarchandises + r.variationStockMarchandises + r.achatsConsommes;
   const margeCommerciale = r.ventesMarchandises - r.achatsMarchandises - r.variationStockMarchandises;
   const chiffreAffaires = r.ventesMarchandises + r.chiffreAffairesAutre;
-  const valeurAjoutee = (chiffreAffaires + r.autresProduitsExploitation) - achatsConsommesTotal - r.consommationsExternes;
+  const consommationsExternes = r.transports + r.servicesExterieurs + r.impotsTaxes + r.autresChargesGestion;
+  const valeurAjoutee = (chiffreAffaires + r.autresProduitsExploitation) - achatsConsommesTotal - consommationsExternes;
   const excedentBrutExploitation = valeurAjoutee - r.chargesPersonnel;
   const resultatExploitation = excedentBrutExploitation - r.dotationsExploitation + r.reprisesExploitation;
   const resultatFinancier = r.produitsFinancieres - r.chargesFinancieres;
@@ -313,11 +338,23 @@ function computeEtatsFinanciers(rows) {
   const resultatNet = resultatActivitesOrdinaires + resultatHAO - r.participationTravailleurs - r.impotsResultat;
 
   const resultat = {
+    ventesMarchandises: r.ventesMarchandises,
+    achatsMarchandises: r.achatsMarchandises,
+    variationStockMarchandises: r.variationStockMarchandises,
+    chiffreAffairesAutre: r.chiffreAffairesAutre,
     margeCommerciale,
     chiffreAffaires,
     autresProduitsExploitation: r.autresProduitsExploitation,
     achatsConsommes: achatsConsommesTotal,
-    consommationsExternes: r.consommationsExternes,
+    // Composante brute de achatsConsommes (achats hors marchandises, ligne RE "Autres achats" du
+    // DSF officiel) : achatsConsommes reste le TOTAL (marchandises + variation + celle-ci), déjà
+    // utilisé ailleurs (dsfEngine.js, ComptabiliteModule.jsx) — ne pas les confondre.
+    achatsMatieresAutres: r.achatsConsommes,
+    consommationsExternes,
+    transports: r.transports,
+    servicesExterieurs: r.servicesExterieurs,
+    impotsTaxes: r.impotsTaxes,
+    autresChargesGestion: r.autresChargesGestion,
     valeurAjoutee,
     chargesPersonnel: r.chargesPersonnel,
     excedentBrutExploitation,
@@ -434,6 +471,11 @@ function computeEtatsFinanciers(rows) {
       stocks,
       creancesClients,
       autresCreances,
+      // Composantes d'autresCreances, exposées séparément pour les lignes DSF officielles qui les
+      // distinguent (BH "Fournisseurs avances versées" vs BJ "Autres créances") — autresCreances
+      // reste leur somme, inchangé, pour la compatibilité des appelants existants.
+      fournisseursAvancesVersees: b.fournisseursDebitReverse,
+      autresCreancesDiverses: b.autresTiersDebit,
       totalActifCirculant,
       tresorerieActif: tresorerieActifNet,
       ecartConversionActif: b.ecartConversionActif,
@@ -452,6 +494,10 @@ function computeEtatsFinanciers(rows) {
       totalRessourcesStables,
       dettesFournisseurs,
       autresDettes,
+      // Composantes d'autresDettes, exposées séparément pour DI "Clients, avances reçues" vs DM
+      // "Autres dettes" du DSF officiel — autresDettes reste leur somme, inchangé.
+      clientsAvancesRecues: b.clientsCreditReverse,
+      autresDettesDiverses: b.autresTiersCredit,
       totalPassifCirculant,
       tresoreriePassif,
       ecartConversionPassif: b.ecartConversionPassif,

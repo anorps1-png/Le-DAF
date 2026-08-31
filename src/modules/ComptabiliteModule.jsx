@@ -89,6 +89,10 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   const [dsfData, setDsfData] = useState(null);
   const [companyForm, setCompanyForm] = useState({});
   const [savingDsfInfo, setSavingDsfInfo] = useState(false);
+  const [isSourceBusy, setIsSourceBusy] = useState(false);
+  const [isRateInput, setIsRateInput] = useState('');
+  const [isRateBusy, setIsRateBusy] = useState(false);
+  const [isRateMsg, setIsRateMsg] = useState(null);
 
   // --- LETTRAGE & ADVANCED STATES ---
   const [lettrageSubTab, setLettrageSubTab] = useState('lettrage'); // 'lettrage' | 'agee'
@@ -110,8 +114,49 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
       .then(data => {
         setDsfData(data);
         if (data.companyInfo) setCompanyForm(data.companyInfo);
+        if (data.tdrf && data.tdrf.isRate !== undefined) setIsRateInput(String(data.tdrf.isRate));
       })
       .catch(e => console.error(e));
+  };
+
+  const handleSaveIsRate = async () => {
+    setIsRateBusy(true);
+    setIsRateMsg(null);
+    try {
+      const res = await fetch('/api/dsf/is-rate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rate: parseFloat(isRateInput) })
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Erreur lors de l'enregistrement du taux.");
+      if (result.data) {
+        setDsfData(result.data);
+        setIsRateInput(String(result.data.tdrf.isRate));
+      }
+      setIsRateMsg({ type: 'success', text: 'Taux mis à jour.' });
+    } catch (e) {
+      setIsRateMsg({ type: 'error', text: e.message });
+    } finally {
+      setIsRateBusy(false);
+    }
+  };
+
+  const handleToggleIsSource = async (source) => {
+    setIsSourceBusy(true);
+    try {
+      const res = await fetch('/api/dsf/is-source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source })
+      });
+      const { data } = await res.json();
+      if (data) setDsfData(data);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSourceBusy(false);
+    }
   };
 
   const fetchLettrageEntries = () => {
@@ -1871,7 +1916,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                 📋 En-tête & Renseignements R1/R2/R3
               </button>
               <button className={`btn ${dsfSubTab === 'tdrf' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('tdrf')} style={{ fontSize: '0.8rem' }}>
-                ⚖️ TDRF & Calcul de l'IS (33%)
+                ⚖️ TDRF & Calcul de l'IS ({tdrf.isRate || 27.5}%)
               </button>
               <button className={`btn ${dsfSubTab === 'tft' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setDsfSubTab('tft')} style={{ fontSize: '0.8rem' }}>
                 🌊 Flux de Trésorerie (TFT)
@@ -1969,16 +2014,71 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                     <span>RÉSULTAT FISCAL IMPOSABLE</span>
                     <span>{(tdrf.resultatFiscalImposable || 0).toLocaleString()} FCFA</span>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
-                    <span>IS Calculé (33% sur résultat fiscal)</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <span>IS Calculé (
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        max="100"
+                        value={isRateInput}
+                        onChange={e => setIsRateInput(e.target.value)}
+                        style={{ width: '55px', padding: '0.15rem 0.3rem', fontSize: '0.85rem', border: '1px solid var(--color-border)', borderRadius: '3px' }}
+                      /> % sur résultat fiscal
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ fontSize: '0.7rem', padding: '0.15rem 0.5rem', marginLeft: '0.4rem' }}
+                        disabled={isRateBusy || parseFloat(isRateInput) === tdrf.isRate}
+                        onClick={handleSaveIsRate}
+                      >
+                        {isRateBusy ? '...' : 'Enregistrer'}
+                      </button>
+                      {isRateMsg && (
+                        <span style={{ marginLeft: '0.4rem', fontSize: '0.72rem', color: isRateMsg.type === 'error' ? '#dc2626' : '#16a34a' }}>
+                          {isRateMsg.text}
+                        </span>
+                      )}
+                    </span>
                     <span>{(tdrf.isCalcule || 0).toLocaleString()} FCFA</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
                     <span>Minimum de perception IS (1% du CA HT)</span>
                     <span>{(tdrf.minimumPerceptionIS || 0).toLocaleString()} FCFA</span>
                   </div>
+
+                  {tdrf.isReel > 0 && (
+                    <div style={{ padding: '0.75rem', background: '#f1f5f9', borderRadius: '4px', border: '1px dashed #94a3b8' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                        <span>IS réellement comptabilisé (compte 89)</span>
+                        <strong>{tdrf.isReel.toLocaleString()} FCFA</strong>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>Source retenue pour la DSF :</span>
+                        <button
+                          type="button"
+                          className={`btn ${tdrf.isSource === 'theorique' ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+                          disabled={isSourceBusy}
+                          onClick={() => handleToggleIsSource('theorique')}
+                        >
+                          Calcul théorique ({tdrf.isRate || 27.5}%)
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn ${tdrf.isSource === 'reel' ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+                          disabled={isSourceBusy}
+                          onClick={() => handleToggleIsSource('reel')}
+                        >
+                          Réellement comptabilisé
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
-                    <span>IMPÔT SUR LES SOCIÉTÉS RETENU (IS)</span>
+                    <span>IMPÔT SUR LES SOCIÉTÉS RETENU (IS){tdrf.isReel > 0 ? ` — ${tdrf.isSource === 'reel' ? 'réel' : 'théorique'}` : ''}</span>
                     <span>{(tdrf.isFinal || 0).toLocaleString()} FCFA</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#dcfce7', color: '#166534', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
@@ -1994,8 +2094,16 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
               <div style={{ maxWidth: '650px' }}>
                 <h4 style={{ marginBottom: '1rem' }}>Tableau des Flux de Trésorerie (TFT - Méthode Indirecte)</h4>
                 <div style={{ display: 'grid', gap: '0.5rem', fontSize: '0.85rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
+                    <span>Capacité d'Autofinancement (CAF)</span>
+                    <span>{(tft.caf || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
+                    <span>- Variation du Besoin en Fonds de Roulement (ΔBFR)</span>
+                    <span>{(tft.deltaBFR || 0).toLocaleString()} FCFA</span>
+                  </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f8fafc', borderRadius: '4px' }}>
-                    <span>Flux de trésorerie provenant des activités d'exploitation (CAF)</span>
+                    <span>Flux de trésorerie provenant des activités d'exploitation</span>
                     <strong>{(tft.fluxExploitation || 0).toLocaleString()} FCFA</strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f8fafc', borderRadius: '4px' }}>
@@ -2009,6 +2117,14 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#cbd5e1', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
                     <span>VARIATION NETTE DE LA TRÉSORERIE DE L'EXERCICE</span>
                     <span>{(tft.variationTrésorerieNette || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem' }}>
+                    <span>Trésorerie d'ouverture (reconstituée depuis le RAN)</span>
+                    <span>{(tft.tresorerieOuverture || 0).toLocaleString()} FCFA</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: '#dcfce7', color: '#166534', borderRadius: '4px', fontWeight: 700, fontSize: '0.95rem' }}>
+                    <span>TRÉSORERIE DE CLÔTURE (TFT)</span>
+                    <span>{(tft.tresorerieCloture || 0).toLocaleString()} FCFA</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.6rem', background: '#f1f5f9', borderRadius: '4px' }}>
                     <span>Trésorerie Nette au Bilan (Disponibilités − Concours bancaires)</span>
@@ -2422,7 +2538,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
           <button className={`btn ${activeTab === 'rapprochement' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setActiveTab('rapprochement'); fetchRapprochement(); }}>🏦 Rapprochement Bancaire</button>
         </div>
 
-        {activeTab !== 'saisie' && (
+        {['journal', 'grandlivre', 'balance', 'bilan', 'resultat'].includes(activeTab) && (
           <div style={{ display: 'flex', gap: '0.4rem' }}>
             <button
               className="btn btn-secondary"
