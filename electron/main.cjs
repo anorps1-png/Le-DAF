@@ -106,7 +106,12 @@ async function switchDatabaseFile(newPath) {
 async function showOpenDbDialog() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Ouvrir un fichier comptable',
-    defaultPath: path.dirname(process.env.DB_PATH),
+    // Chemin complet (dossier + nom de fichier) du dossier comptable ACTUELLEMENT actif, pas
+    // juste son dossier : sur Windows, le sélecteur de fichier ne suit fiablement le
+    // "defaultPath" demandé par l'appli que si un nom de fichier est inclus, sinon il retombe
+    // sur le dernier dossier visité manuellement (comportement natif Windows, cf. showNewDbDialog
+    // ci-dessous qui fonctionnait déjà ainsi).
+    defaultPath: process.env.DB_PATH,
     properties: ['openFile'],
     filters: [
       { name: 'Base comptable (.sqlite)', extensions: ['sqlite', 'db'] },
