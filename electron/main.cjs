@@ -100,6 +100,33 @@ async function switchDatabaseFile(newPath) {
   app.exit(0);
 }
 
+// Extraites du menu "Fichier" pour être réutilisables aussi depuis les Paramètres (renderer, via
+// IPC) : la carte "Dossier Comptable Actif" de SettingsModule.jsx doit proposer les mêmes actions
+// que le menu natif plutôt que de dupliquer le flux web (upload HTTP), qui n'a pas de sens ici.
+async function showOpenDbDialog() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Ouvrir un fichier comptable',
+    defaultPath: path.dirname(process.env.DB_PATH),
+    properties: ['openFile'],
+    filters: [
+      { name: 'Base comptable (.sqlite)', extensions: ['sqlite', 'db'] },
+      { name: 'Tous les fichiers', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || result.filePaths.length === 0) return;
+  await switchDatabaseFile(result.filePaths[0]);
+}
+
+async function showNewDbDialog() {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Créer un nouveau fichier comptable',
+    defaultPath: path.join(path.dirname(process.env.DB_PATH), 'Nouvelle entreprise.sqlite'),
+    filters: [{ name: 'Base comptable (.sqlite)', extensions: ['sqlite'] }]
+  });
+  if (result.canceled || !result.filePath) return;
+  await switchDatabaseFile(result.filePath);
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -145,32 +172,12 @@ async function createWindow() {
         {
           label: 'Ouvrir un fichier comptable...',
           accelerator: 'CmdOrCtrl+O',
-          click: async () => {
-            const result = await dialog.showOpenDialog(mainWindow, {
-              title: 'Ouvrir un fichier comptable',
-              defaultPath: path.dirname(process.env.DB_PATH),
-              properties: ['openFile'],
-              filters: [
-                { name: 'Base comptable (.sqlite)', extensions: ['sqlite', 'db'] },
-                { name: 'Tous les fichiers', extensions: ['*'] }
-              ]
-            });
-            if (result.canceled || result.filePaths.length === 0) return;
-            await switchDatabaseFile(result.filePaths[0]);
-          }
+          click: () => showOpenDbDialog()
         },
         {
           label: 'Nouveau fichier comptable...',
           accelerator: 'CmdOrCtrl+N',
-          click: async () => {
-            const result = await dialog.showSaveDialog(mainWindow, {
-              title: 'Créer un nouveau fichier comptable',
-              defaultPath: path.join(path.dirname(process.env.DB_PATH), 'Nouvelle entreprise.sqlite'),
-              filters: [{ name: 'Base comptable (.sqlite)', extensions: ['sqlite'] }]
-            });
-            if (result.canceled || !result.filePath) return;
-            await switchDatabaseFile(result.filePath);
-          }
+          click: () => showNewDbDialog()
         },
         { type: 'separator' },
         { label: 'Recharger', accelerator: 'CmdOrCtrl+R', click: () => mainWindow.reload() },
@@ -217,6 +224,9 @@ if (!gotTheLock) {
   app.whenReady().then(async () => {
     ipcMain.handle('get-app-version', () => app.getVersion());
     ipcMain.handle('get-user-data-path', () => userDataPath);
+    ipcMain.handle('db:open-dialog', () => showOpenDbDialog());
+    ipcMain.handle('db:new-dialog', () => showNewDbDialog());
+    ipcMain.handle('db:switch-to', (event, targetPath) => switchDatabaseFile(targetPath));
 
     startBackendServer();
     await createWindow();

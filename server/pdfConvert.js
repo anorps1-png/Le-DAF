@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const EXCEL_TO_PDF_SCRIPT = path.join(__dirname, 'scripts', 'excel-to-pdf.ps1');
+const EXCEL_TO_PDF_SCRIPT = path.join(__dirname, 'bin', 'excel-to-pdf.ps1');
 
 function convertViaExcelCom(inputPath, outputPath) {
   return new Promise((resolve, reject) => {

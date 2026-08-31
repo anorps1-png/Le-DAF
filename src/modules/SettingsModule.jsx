@@ -74,7 +74,7 @@ export const SettingsModule = () => {
       .catch(() => {});
 
     fetchSyncStatus();
-    if (!isElectronApp) fetchDbInfo();
+    fetchDbInfo();
   }, []);
 
   const fetchDbInfo = () => {
@@ -135,6 +135,11 @@ export const SettingsModule = () => {
   };
 
   const handleSwitchDb = async (targetPath, name) => {
+    if (isElectronApp) {
+      // La version Electron gère elle-même la confirmation + le redémarrage (voir main.cjs).
+      await window.electronAPI.invoke('db:switch-to', targetPath);
+      return;
+    }
     if (!window.confirm(`Basculer vers le dossier comptable "${name}" ? L'application va se recharger.`)) return;
     setIsDbBusy(true);
     setDbActionMsg(null);
@@ -687,9 +692,8 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
         )}
       </div>
 
-      {/* CARD : DOSSIER COMPTABLE ACTIF (multi-entreprises façon Sage Saari, version web) */}
-      {!isElectronApp && (
-        <div className="card">
+      {/* CARD : DOSSIER COMPTABLE ACTIF (multi-entreprises façon Sage Saari) */}
+      <div className="card">
           <h3 style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <FolderOpen style={{ color: 'var(--color-primary)' }} />
             Dossier Comptable Actif
@@ -704,56 +708,77 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
             Dossier actif : <strong>{dbInfo && dbInfo.name ? dbInfo.name : '...'}</strong>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
-            <button
-              className="btn btn-secondary"
-              disabled={isDbBusy}
-              onClick={() => dbFileInputRef.current && dbFileInputRef.current.click()}
-              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
-            >
-              <FolderOpen size={16} /> Ouvrir un fichier comptable...
-            </button>
-            <input
-              ref={dbFileInputRef}
-              type="file"
-              accept=".sqlite,.sqlite3,.db"
-              style={{ display: 'none' }}
-              onChange={handleOpenDbFile}
-            />
-            <a
-              href="/api/db/download"
-              download
-              className="btn btn-secondary"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', textDecoration: 'none' }}
-            >
-              <Download size={16} /> Télécharger le dossier actif
-            </a>
-          </div>
-
-          <div style={{ marginBottom: '1.25rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Créer un nouveau dossier comptable</label>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <input
-                type="text"
-                className="input"
-                value={newDbName}
-                onChange={e => setNewDbName(e.target.value)}
-                placeholder="Nom de l'entreprise"
-                style={{ flex: 1 }}
-              />
-              <button className="btn btn-primary" onClick={handleCreateDb} disabled={isDbBusy || !newDbName.trim()}>
-                <FilePlus size={16} /> Créer
+          {isElectronApp ? (
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => window.electronAPI.invoke('db:open-dialog')}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
+              >
+                <FolderOpen size={16} /> Ouvrir un fichier comptable...
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => window.electronAPI.invoke('db:new-dialog')}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
+              >
+                <FilePlus size={16} /> Nouveau fichier comptable...
               </button>
             </div>
-            <input
-              type="text"
-              className="input"
-              value={newDbFolder}
-              onChange={e => setNewDbFolder(e.target.value)}
-              placeholder={dbInfo && dbInfo.defaultFolder ? `Emplacement (optionnel) - vide = ${dbInfo.defaultFolder}` : 'Emplacement (optionnel) - dossier complet, ex : C:\\Comptes\\MonEntreprise'}
-              style={{ fontSize: '0.8rem' }}
-            />
-          </div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+                <button
+                  className="btn btn-secondary"
+                  disabled={isDbBusy}
+                  onClick={() => dbFileInputRef.current && dbFileInputRef.current.click()}
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}
+                >
+                  <FolderOpen size={16} /> Ouvrir un fichier comptable...
+                </button>
+                <input
+                  ref={dbFileInputRef}
+                  type="file"
+                  accept=".sqlite,.sqlite3,.db"
+                  style={{ display: 'none' }}
+                  onChange={handleOpenDbFile}
+                />
+                <a
+                  href="/api/db/download"
+                  download
+                  className="btn btn-secondary"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', textDecoration: 'none' }}
+                >
+                  <Download size={16} /> Télécharger le dossier actif
+                </a>
+              </div>
+
+              <div style={{ marginBottom: '1.25rem' }}>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontWeight: 500, fontSize: '0.85rem' }}>Créer un nouveau dossier comptable</label>
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <input
+                    type="text"
+                    className="input"
+                    value={newDbName}
+                    onChange={e => setNewDbName(e.target.value)}
+                    placeholder="Nom de l'entreprise"
+                    style={{ flex: 1 }}
+                  />
+                  <button className="btn btn-primary" onClick={handleCreateDb} disabled={isDbBusy || !newDbName.trim()}>
+                    <FilePlus size={16} /> Créer
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  className="input"
+                  value={newDbFolder}
+                  onChange={e => setNewDbFolder(e.target.value)}
+                  placeholder={dbInfo && dbInfo.defaultFolder ? `Emplacement (optionnel) - vide = ${dbInfo.defaultFolder}` : 'Emplacement (optionnel) - dossier complet, ex : C:\\Comptes\\MonEntreprise'}
+                  style={{ fontSize: '0.8rem' }}
+                />
+              </div>
+            </>
+          )}
 
           {dbList.length > 0 && (
             <div>
@@ -795,8 +820,7 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
               {dbActionMsg.text}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       {/* Carte Mises à jour & Multi-postes */}
       <div className="card" style={{ marginTop: '1.5rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-lg)' }}>
