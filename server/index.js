@@ -3242,58 +3242,56 @@ app.post('/api/audit/apply', async (req, res) => {
     db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows || []); });
   });
 
-  db.serialize(() => {
-    (async () => {
+  try {
+    // Snapshot en mémoire (plutôt qu'une table temporaire SQL) : une TEMP TABLE créée à l'intérieur
+    // d'une transaction explicite s'est révélée peu fiable avec ce driver sur de gros lots
+    // d'instructions (disparaît entre sa création et sa lecture) — un simple Map JS évite tout
+    // couplage avec le cycle de vie transactionnel du moteur.
+    const before = await dbAll("SELECT * FROM journal WHERE date < ? OR date > ?", [date_debut, date_fin]);
+    const beforeById = new Map(before.map(r => [r.id, JSON.stringify(r)]));
+
+    await dbRun("BEGIN TRANSACTION");
+
+    let totalChanges = 0;
+    for (const stmt of statements) {
       try {
-        await dbRun("BEGIN TRANSACTION");
-        await dbRun("DROP TABLE IF EXISTS temp._pre_outside_journal");
-        await dbRun(
-          "CREATE TEMP TABLE _pre_outside_journal AS SELECT * FROM journal WHERE date < ? OR date > ?",
-          [date_debut, date_fin]
-        );
-
-        let totalChanges = 0;
-        for (const stmt of statements) {
-          try {
-            const result = await dbRun(stmt);
-            totalChanges += (result.changes || 0);
-          } catch (stmtErr) {
-            throw new Error(`Erreur SQL sur [${stmt.slice(0, 40)}...] : ${stmtErr.message}`);
-          }
-        }
-
-        const staleOrDeleted = await dbAll(
-          "SELECT COUNT(*) as c FROM (SELECT * FROM _pre_outside_journal EXCEPT SELECT * FROM journal)"
-        );
-        const newlyOutside = await dbAll(
-          "SELECT COUNT(*) as c FROM journal WHERE (date < ? OR date > ?) AND id NOT IN (SELECT id FROM _pre_outside_journal)",
-          [date_debut, date_fin]
-        );
-        const violations = (staleOrDeleted[0]?.c || 0) + (newlyOutside[0]?.c || 0);
-
-        await dbRun("DROP TABLE IF EXISTS temp._pre_outside_journal");
-
-        if (violations > 0 && !hasValidAdminToken(req)) {
-          await dbRun("ROLLBACK");
-          return res.status(403).json({
-            error: `Action refusée : elle affecterait ${violations} écriture(s) en dehors de l'exercice actuellement ouvert (${activeExercice.libelle || ''}). Déverrouillez la Zone Administrateur pour autoriser le Cerveau IA à modifier un autre exercice.`,
-            code: 'ADMIN_LOCKED'
-          });
-        }
-
-        await dbRun("COMMIT");
-        res.json({
-          success: true,
-          changes: totalChanges,
-          statementsCount: statements.length,
-          message: `${statements.length} action(s) exécutée(s) avec succès (${totalChanges} ligne(s) affectée(s)).`
-        });
-      } catch (err) {
-        try { await dbRun("ROLLBACK"); } catch (e) {}
-        res.status(500).json({ error: err.message || "Erreur lors de l'exécution SQL." });
+        const result = await dbRun(stmt);
+        totalChanges += (result.changes || 0);
+      } catch (stmtErr) {
+        throw new Error(`Erreur SQL sur [${stmt.slice(0, 40)}...] : ${stmtErr.message}`);
       }
-    })();
-  });
+    }
+
+    const after = await dbAll("SELECT * FROM journal WHERE date < ? OR date > ?", [date_debut, date_fin]);
+    const afterById = new Map(after.map(r => [r.id, JSON.stringify(r)]));
+
+    let violations = 0;
+    for (const [id, json] of beforeById) {
+      if (afterById.get(id) !== json) violations++; // modifiée ou supprimée
+    }
+    for (const id of afterById.keys()) {
+      if (!beforeById.has(id)) violations++; // nouvelle ligne apparue hors exercice
+    }
+
+    if (violations > 0 && !hasValidAdminToken(req)) {
+      await dbRun("ROLLBACK");
+      return res.status(403).json({
+        error: `Action refusée : elle affecterait ${violations} écriture(s) en dehors de l'exercice actuellement ouvert (${activeExercice.libelle || ''}). Déverrouillez la Zone Administrateur pour autoriser le Cerveau IA à modifier un autre exercice.`,
+        code: 'ADMIN_LOCKED'
+      });
+    }
+
+    await dbRun("COMMIT");
+    res.json({
+      success: true,
+      changes: totalChanges,
+      statementsCount: statements.length,
+      message: `${statements.length} action(s) exécutée(s) avec succès (${totalChanges} ligne(s) affectée(s)).`
+    });
+  } catch (err) {
+    try { await dbRun("ROLLBACK"); } catch (e) {}
+    res.status(500).json({ error: err.message || "Erreur lors de l'exécution SQL." });
+  }
 });
 
 // --- MEMORY & BUSINESS RULES ROUTES ---
