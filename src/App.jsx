@@ -13,6 +13,7 @@ import { AuditModule } from './modules/AuditModule';
 import { MemoryModule } from './modules/MemoryModule';
 import { AnalyseFinanciereModule } from './modules/AnalyseFinanciereModule';
 import { fetchDirectDashboardStats, fetchDirectSupabaseExercices } from './utils/supabaseClient';
+import { adminFetch } from './utils/adminAuth';
 
 // Sélecteur d'exercice comptable, visible en permanence dans le header : l'exercice actif est
 // une sélection globale côté serveur (voir server/index.js getActiveExercice), donc changer de
@@ -314,7 +315,7 @@ const ChatbotIA = ({ messages, setMessages, input, setInput, loading, setLoading
 
   const handleApprove = async (index, sql) => {
     try {
-      const res = await fetch('/api/audit/apply', {
+      const res = await adminFetch('/api/audit/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql })

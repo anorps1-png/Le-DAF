@@ -3273,10 +3273,11 @@ app.post('/api/audit/apply', async (req, res) => {
 
         await dbRun("DROP TABLE IF EXISTS temp._pre_outside_journal");
 
-        if (violations > 0) {
+        if (violations > 0 && !hasValidAdminToken(req)) {
           await dbRun("ROLLBACK");
-          return res.status(400).json({
-            error: `Action refusée : elle affecterait ${violations} écriture(s) en dehors de l'exercice actuellement ouvert (${activeExercice.libelle || ''}). Le Cerveau IA ne peut modifier que l'exercice comptable actif.`
+          return res.status(403).json({
+            error: `Action refusée : elle affecterait ${violations} écriture(s) en dehors de l'exercice actuellement ouvert (${activeExercice.libelle || ''}). Déverrouillez la Zone Administrateur pour autoriser le Cerveau IA à modifier un autre exercice.`,
+            code: 'ADMIN_LOCKED'
           });
         }
 

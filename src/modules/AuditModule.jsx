@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { ShieldAlert, BrainCircuit, CheckCircle, AlertTriangle } from 'lucide-react';
+import { adminFetch } from '../utils/adminAuth';
 
 export const AuditModule = () => {
   const [anomalies, setAnomalies] = useState([]);
@@ -45,7 +46,7 @@ export const AuditModule = () => {
   const applyCorrection = async () => {
     if (!aiAdvice?.sql) return;
     try {
-      const res = await fetch('/api/audit/apply', {
+      const res = await adminFetch('/api/audit/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql: aiAdvice.sql })
