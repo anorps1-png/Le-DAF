@@ -303,6 +303,45 @@ app.get('/api/exercices/active', async (req, res) => {
   }
 });
 
+// --- ZONE ADMINISTRATEUR (mot de passe) ---
+// Écrire/supprimer une écriture datée EN DEHORS de l'exercice actif (correction d'un exercice
+// antérieur, purge, etc.) est une action à risque — pas de contrôle a posteriori, pas de piste
+// d'audit dans ce logiciel. Plutôt que de l'interdire (elle doit rester possible), on la fait
+// passer par un mot de passe : une fois déverrouillé, le jeton reste valide jusqu'au redémarrage
+// du serveur (mode "session entière"), pas besoin de le ressaisir à chaque action. Le mot de passe
+// n'est stocké nulle part en clair, seul son hash l'est.
+const ADMIN_PASSWORD_HASH = '5c2d171dbaa07644abafbe44b34ad11ee290daa6d2f4b0fa7414373a9ffb3f93';
+const adminUnlockTokens = new Set();
+
+function hashPassword(pw) {
+  return crypto.createHash('sha256').update(String(pw)).digest('hex');
+}
+
+function hasValidAdminToken(req) {
+  const token = req.headers['x-admin-token'] || (req.body && req.body.adminToken);
+  return !!token && adminUnlockTokens.has(token);
+}
+
+// true si la date tombe HORS de l'exercice actif (donc nécessite le déverrouillage) ; false si
+// elle est dans l'exercice actif OU si aucun exercice n'est sélectionné (mode "tous les
+// exercices" : pas de notion d'"autre" exercice dans ce cas, comportement inchangé).
+async function isOutsideActiveExercice(dateStr) {
+  if (!dateStr) return false;
+  const ex = await getActiveExercice();
+  if (!ex) return false;
+  return dateStr < ex.date_debut || dateStr > ex.date_fin;
+}
+
+app.post('/api/admin/unlock', (req, res) => {
+  const { password } = req.body || {};
+  if (!password || hashPassword(password) !== ADMIN_PASSWORD_HASH) {
+    return res.status(401).json({ error: 'Mot de passe incorrect.' });
+  }
+  const token = crypto.randomUUID();
+  adminUnlockTokens.add(token);
+  res.json({ token });
+});
+
 // --- SETTINGS ROUTES ---
 app.get('/api/settings', sensitiveLimiter, (req, res) => {
   db.all("SELECT key, value FROM settings", (err, rows) => {
@@ -1718,6 +1757,13 @@ app.put('/api/journal/:id', async (req, res) => {
       return res.status(400).json({ error: 'Compte, libellé et date sont obligatoires.' });
     }
 
+    const existingDateRow = await db.runSelect('SELECT date FROM journal WHERE id = ?', [id]);
+    if (existingDateRow.length === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
+    const crossExercice = (await isOutsideActiveExercice(existingDateRow[0].date)) || (await isOutsideActiveExercice(date));
+    if (crossExercice && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: "Cette écriture appartient à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur pour la modifier.", code: 'ADMIN_LOCKED' });
+    }
+
     let piece_id = null;
     if (contrepartie && contrepartie.compte && String(contrepartie.compte).trim()) {
       const existingRow = await db.runSelect('SELECT piece_id FROM journal WHERE id = ?', [id]);
@@ -1781,6 +1827,14 @@ app.patch('/api/journal/bulk-compte', async (req, res) => {
       return res.status(400).json({ error: 'Compte obligatoire.' });
     }
     const placeholders = ids.map(() => '?').join(',');
+
+    const targetRows = await db.runSelect(`SELECT date FROM journal WHERE id IN (${placeholders})`, ids);
+    const activeEx = await getActiveExercice();
+    const crossExercice = !!activeEx && targetRows.some(r => r.date < activeEx.date_debut || r.date > activeEx.date_fin);
+    if (crossExercice && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: "Une ou plusieurs écritures sélectionnées appartiennent à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur pour les modifier.", code: 'ADMIN_LOCKED' });
+    }
+
     const result = await db.runUpdate(
       `UPDATE journal SET compte=?, updated_at=CURRENT_TIMESTAMP, synced_at=NULL WHERE id IN (${placeholders})`,
       [compte, ...ids]
@@ -1805,6 +1859,11 @@ app.patch('/api/journal/bulk-compte', async (req, res) => {
 app.delete('/api/journal/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const existingDateRow = await db.runSelect('SELECT date FROM journal WHERE id = ?', [id]);
+    if (existingDateRow.length === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
+    if ((await isOutsideActiveExercice(existingDateRow[0].date)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: "Cette écriture appartient à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur pour la supprimer.", code: 'ADMIN_LOCKED' });
+    }
     const result = await db.runUpdate('DELETE FROM journal WHERE id=?', [id]);
     if (result.changes === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
     try {
@@ -1976,7 +2035,7 @@ app.delete('/api/fiscalite/echeances/:id', (req, res) => {
 
 // An écriture is one or more lines sharing a piece_id; it must balance (sum debit === sum credit)
 // before it can be persisted, so the ledger never accepts a one-sided entry.
-app.post('/api/journal', (req, res) => {
+app.post('/api/journal', async (req, res) => {
   const { code_journal, poste_budgetaire, date, n_facture, reference, lines } = req.body;
 
   // Le journal Caisse (CA) suppose un mouvement de caisse même si l'utilisateur n'a pas saisi
@@ -1985,6 +2044,10 @@ app.post('/api/journal', (req, res) => {
   const minLines = code_journal === 'CA' ? 1 : 2;
   if (!code_journal || !date || !Array.isArray(lines) || lines.length < minLines) {
     return res.status(400).json({ error: `Code Journal, Date et au moins ${minLines} ligne(s) sont obligatoires.` });
+  }
+
+  if ((await isOutsideActiveExercice(date)) && !hasValidAdminToken(req)) {
+    return res.status(403).json({ error: "Cette date tombe hors de l'exercice actif. Déverrouillez la Zone Administrateur pour saisir une écriture sur un autre exercice.", code: 'ADMIN_LOCKED' });
   }
 
   for (const l of lines) {

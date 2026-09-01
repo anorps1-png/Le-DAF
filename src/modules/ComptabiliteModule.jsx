@@ -4,6 +4,53 @@ import { getAccountLabel } from '../utils/ohadaPlan';
 import { fetchDirectSupabaseJournal, fetchDirectSupabaseTiers } from '../utils/supabaseClient';
 import { AccountPicker } from '../components/AccountPicker';
 
+// Modifier/supprimer une écriture d'un exercice autre que l'exercice actif est protégé côté
+// serveur par un mot de passe (voir server/index.js, ADMIN_LOCKED) — sans piste d'audit dans ce
+// logiciel, c'est le seul garde-fou contre une correction accidentelle d'un exercice antérieur.
+// Une fois déverrouillé, le jeton est mémorisé pour toute la session (sessionStorage) : pas besoin
+// de ressaisir le mot de passe à chaque action tant que l'appli reste ouverte.
+async function unlockAdminZone() {
+  const password = window.prompt("Cette action concerne un exercice différent de l'exercice actif.\nMot de passe Zone Administrateur :");
+  if (!password) return null;
+  try {
+    const res = await fetch('/api/admin/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      window.alert(data.error || 'Mot de passe incorrect.');
+      return null;
+    }
+    sessionStorage.setItem('adminToken', data.token);
+    return data.token;
+  } catch (e) {
+    window.alert('Erreur réseau lors du déverrouillage.');
+    return null;
+  }
+}
+
+// Remplace fetch() pour toute action pouvant toucher un autre exercice que l'actif (édition,
+// suppression, changement de compte en masse, saisie manuelle) : rejoue automatiquement la requête
+// avec le jeton Zone Administrateur si le serveur la refuse pour cette raison (code ADMIN_LOCKED).
+async function adminFetch(url, options = {}) {
+  const existingToken = sessionStorage.getItem('adminToken') || '';
+  const withToken = (token) => ({ ...options, headers: { ...(options.headers || {}), ...(token ? { 'X-Admin-Token': token } : {}) } });
+  let res = await fetch(url, withToken(existingToken));
+  if (res.status === 403) {
+    let data = null;
+    try { data = await res.clone().json(); } catch (e) { /* réponse non-JSON, ignorer */ }
+    if (data && data.code === 'ADMIN_LOCKED') {
+      const newToken = await unlockAdminZone();
+      if (newToken) {
+        res = await fetch(url, withToken(newToken));
+      }
+    }
+  }
+  return res;
+}
+
 export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = {}) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'saisie');
 
@@ -416,7 +463,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
     setBulkApplying(true);
     setBulkMsg(null);
     try {
-      const res = await fetch('/api/journal/bulk-compte', {
+      const res = await adminFetch('/api/journal/bulk-compte', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: selectedGlIds, compte: bulkNewCompte.trim() })
@@ -530,7 +577,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
           libelle: editContrepartie.libelle.trim() || undefined
         };
       }
-      const res = await fetch(`/api/journal/${id}`, {
+      const res = await adminFetch(`/api/journal/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -553,7 +600,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
   const deleteRow = async (id) => {
     if (!window.confirm('Supprimer définitivement cette écriture ?')) return;
     try {
-      const res = await fetch(`/api/journal/${id}`, { method: 'DELETE' });
+      const res = await adminFetch(`/api/journal/${id}`, { method: 'DELETE' });
       const resData = await res.json();
       if (resData.success) {
         setRowActionStatus('Succès : Écriture supprimée.');
@@ -583,7 +630,7 @@ export const ComptabiliteModule = ({ initialTab, initialCompte, onTabChange } = 
     setLoading(true);
     setManualStatus('Enregistrement de l\'écriture...');
     try {
-      const res = await fetch('/api/journal', {
+      const res = await adminFetch('/api/journal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...manualHeader, lines: manualLines })
