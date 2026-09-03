@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft, Trash2 } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft, Trash2, PieChart } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -12,6 +12,8 @@ import { ComptabiliteModule } from './modules/ComptabiliteModule';
 import { AuditModule } from './modules/AuditModule';
 import { MemoryModule } from './modules/MemoryModule';
 import { AnalyseFinanciereModule } from './modules/AnalyseFinanciereModule';
+import { BudgetModule } from './modules/BudgetModule';
+import { CashForecastModule } from './modules/CashForecastModule';
 import { fetchDirectDashboardStats, fetchDirectSupabaseExercices } from './utils/supabaseClient';
 import { adminFetch } from './utils/adminAuth';
 
@@ -664,6 +666,8 @@ function App() {
       case 'import': return <ImportModule key={moduleKey} />;
       case 'audit': return <AuditModule key={moduleKey} />;
       case 'memory': return <MemoryModule key={moduleKey} />;
+      case 'forecast': return <CashForecastModule key={moduleKey} />;
+      case 'budget': return <BudgetModule key={moduleKey} />;
       case 'analyse': return <AnalyseFinanciereModule key={moduleKey} />;
       case 'settings': return <SettingsModule key={moduleKey} />;
       default: return (
@@ -677,6 +681,8 @@ function App() {
   const navItems = [
     { id: 'ia', label: 'Cerveau IA (Chat)', icon: <MessageSquare className="nav-icon" /> },
     { id: 'memory', label: 'Mémoire Métier (Brain)', icon: <BrainCircuit className="nav-icon" /> },
+    { id: 'forecast', label: 'Plan de Trésorerie (Forecast)', icon: <Landmark className="nav-icon" /> },
+    { id: 'budget', label: 'Contrôle Budgétaire', icon: <PieChart className="nav-icon" /> },
     { id: 'analyse', label: 'Analyse Financière & KPIs', icon: <TrendingUp className="nav-icon" /> },
     { id: 'dashboard', label: 'Vue d\'ensemble', icon: <LayoutDashboard className="nav-icon" /> },
     { id: 'saisie', label: 'Compta & États Financiers', icon: <FileText className="nav-icon" /> },

@@ -2383,6 +2383,265 @@ app.get('/api/resultat', async (req, res) => {
   }
 });
 
+// --- MODULE CONTRÔLE BUDGÉTAIRE (BUDGET VS RÉEL DAF) ---
+app.get('/api/budgets', async (req, res) => {
+  try {
+    const ex = await getActiveExercice();
+    const exId = ex ? ex.id : null;
+    const { clause, params } = await getExerciceDateFilter();
+
+    let budgets = await db.runSelect("SELECT * FROM budgets WHERE exercice_id = ? OR exercice_id IS NULL ORDER BY compte_racine ASC", [exId]);
+
+    // Initialiser des enveloppes budgétaires par défaut si la table est vide
+    if (!budgets || budgets.length === 0) {
+      const defaultBudgets = [
+        { compte_racine: '60', libelle: 'Achats & Approvisionnements', type: 'charge', montant_alloue: 25000000 },
+        { compte_racine: '61', libelle: 'Transports & Déplacements', type: 'charge', montant_alloue: 5000000 },
+        { compte_racine: '62', libelle: 'Services Extérieurs & Loyers', type: 'charge', montant_alloue: 12000000 },
+        { compte_racine: '63', libelle: 'Autres Services Extérieurs', type: 'charge', montant_alloue: 4000000 },
+        { compte_racine: '64', libelle: 'Impôts, Taxes & Versements', type: 'charge', montant_alloue: 6000000 },
+        { compte_racine: '66', libelle: 'Charges de Personnel & Salaires', type: 'charge', montant_alloue: 30000000 },
+        { compte_racine: '70', libelle: 'Ventes de Marchandises & Services', type: 'produit', montant_alloue: 95000000 }
+      ];
+      for (const b of defaultBudgets) {
+        await db.runUpdate(
+          "INSERT INTO budgets (exercice_id, compte_racine, libelle, type, montant_alloue) VALUES (?, ?, ?, ?, ?)",
+          [exId, b.compte_racine, b.libelle, b.type, b.montant_alloue]
+        );
+      }
+      budgets = await db.runSelect("SELECT * FROM budgets WHERE exercice_id = ? OR exercice_id IS NULL ORDER BY compte_racine ASC", [exId]);
+    }
+
+    // Récupérer les consommations réelles par racine de compte
+    const actualRows = await db.runSelect(`
+      SELECT compte, SUM(debit) as total_debit, SUM(credit) as total_credit
+      FROM journal
+      ${clause ? `WHERE ${clause}` : ''}
+      GROUP BY compte
+    `, params);
+
+    const items = budgets.map(b => {
+      const racine = String(b.compte_racine || '');
+      let consumed = 0;
+      actualRows.forEach(r => {
+        if (String(r.compte || '').startsWith(racine)) {
+          if (b.type === 'charge') {
+            consumed += ((r.total_debit || 0) - (r.total_credit || 0));
+          } else {
+            consumed += ((r.total_credit || 0) - (r.total_debit || 0));
+          }
+        }
+      });
+      consumed = Math.max(0, consumed);
+      const alloue = parseFloat(b.montant_alloue) || 0;
+      const ecart = alloue - consumed;
+      const taux = alloue > 0 ? ((consumed / alloue) * 100) : 0;
+      
+      let statut = 'normal';
+      if (b.type === 'charge') {
+        if (taux >= 100) statut = 'depassement';
+        else if (taux >= 80) statut = 'vigilance';
+        else statut = 'normal';
+      } else {
+        if (taux >= 100) statut = 'atteint';
+        else if (taux >= 70) statut = 'en_cours';
+        else statut = 'retard';
+      }
+
+      return {
+        id: b.id,
+        exercice_id: b.exercice_id,
+        compte_racine: b.compte_racine,
+        libelle: b.libelle,
+        type: b.type,
+        montant_alloue: alloue,
+        consomme: consumed,
+        ecart,
+        taux_consommation: parseFloat(taux.toFixed(1)),
+        statut
+      };
+    });
+
+    const charges = items.filter(i => i.type === 'charge');
+    const produits = items.filter(i => i.type === 'produit');
+
+    const totalChargesAlloue = charges.reduce((acc, i) => acc + i.montant_alloue, 0);
+    const totalChargesConsomme = charges.reduce((acc, i) => acc + i.consomme, 0);
+    const totalProduitsAlloue = produits.reduce((acc, i) => acc + i.montant_alloue, 0);
+    const totalProduitsConsomme = produits.reduce((acc, i) => acc + i.consomme, 0);
+
+    res.json({
+      exercice: ex ? ex.libelle : 'Tous exercices',
+      items,
+      synthese: {
+        totalChargesAlloue,
+        totalChargesConsomme,
+        reliquatCharges: totalChargesAlloue - totalChargesConsomme,
+        tauxConsommationCharges: totalChargesAlloue > 0 ? parseFloat(((totalChargesConsomme / totalChargesAlloue) * 100).toFixed(1)) : 0,
+        totalProduitsAlloue,
+        totalProduitsConsomme,
+        reliquatProduits: totalProduitsAlloue - totalProduitsConsomme,
+        tauxRealisationProduits: totalProduitsAlloue > 0 ? parseFloat(((totalProduitsConsomme / totalProduitsAlloue) * 100).toFixed(1)) : 0
+      }
+    });
+  } catch (err) {
+    console.error("Erreur budgets:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/budgets', async (req, res) => {
+  try {
+    const { id, compte_racine, libelle, type, montant_alloue, exercice_id } = req.body;
+    if (!compte_racine || !libelle) {
+      return res.status(400).json({ error: "Le compte racine et le libellé sont obligatoires." });
+    }
+    const ex = await getActiveExercice();
+    const finalExerciceId = exercice_id !== undefined ? exercice_id : (ex ? ex.id : null);
+
+    if (id) {
+      await db.runUpdate(
+        "UPDATE budgets SET compte_racine = ?, libelle = ?, type = ?, montant_alloue = ?, exercice_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [compte_racine, libelle, type || 'charge', parseFloat(montant_alloue) || 0, finalExerciceId, id]
+      );
+      res.json({ success: true, id });
+    } else {
+      const result = await db.runUpdate(
+        "INSERT INTO budgets (exercice_id, compte_racine, libelle, type, montant_alloue) VALUES (?, ?, ?, ?, ?)",
+        [finalExerciceId, compte_racine, libelle, type || 'charge', parseFloat(montant_alloue) || 0]
+      );
+      res.json({ success: true, id: result.lastID });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/budgets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.runUpdate("DELETE FROM budgets WHERE id = ?", [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- MODULE CASH FORECAST (PLAN DE TRÉSORERIE PRÉVISIONNEL DAF) ---
+app.get('/api/cash-forecast', async (req, res) => {
+  try {
+    const rows = await getFinancialRows();
+    const fin = computeFinancials(rows || []);
+
+    const cashActuel = Math.max(0, fin.tresorerieActif - fin.tresoreriePassif);
+    const caAnnuel = fin.ca || 0;
+    const caMoyenMois = caAnnuel > 0 ? (caAnnuel / 12) : 5000000;
+    const creancesClients = fin.creancesClients || 0;
+    const dettesFournisseurs = fin.dettesFournisseurs || 0;
+    const chargesPersonnelMois = fin.chargesPersonnel > 0 ? (fin.chargesPersonnel / 12) : 2500000;
+    const chargesExternesMois = fin.servicesExterieurs > 0 ? (fin.servicesExterieurs / 12) : 1200000;
+    const impotsMois = Math.round(caMoyenMois * 0.05);
+
+    const monthNames = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
+    const now = new Date();
+    const currentMonthIdx = now.getMonth();
+    const currentYear = now.getFullYear();
+
+    const projections = [];
+    let runningCash = cashActuel;
+
+    const clientFactors = [0.40, 0.30, 0.20, 0.10];
+    const supplierFactors = [0.50, 0.30, 0.20, 0.00];
+
+    for (let i = 0; i < 4; i++) {
+      const mIdx = (currentMonthIdx + i) % 12;
+      const yOffset = Math.floor((currentMonthIdx + i) / 12);
+      const year = currentYear + yOffset;
+      const label = `${monthNames[mIdx]} ${year}`;
+
+      const soldeDebut = runningCash;
+      const encaissementClients = Math.round(creancesClients * clientFactors[i]);
+      const ventesMois = Math.round(caMoyenMois * (1 + (i * 0.03)));
+      const totalEncaissements = encaissementClients + ventesMois;
+
+      const decaissementFournisseurs = Math.round(dettesFournisseurs * supplierFactors[i]) + Math.round(caMoyenMois * 0.25);
+      const salaires = Math.round(chargesPersonnelMois);
+      const chargesExternes = Math.round(chargesExternesMois);
+      const impots = Math.round(impotsMois);
+      const totalDecaissements = decaissementFournisseurs + salaires + chargesExternes + impots;
+
+      const variationNette = totalEncaissements - totalDecaissements;
+      const soldeFin = soldeDebut + variationNette;
+      runningCash = soldeFin;
+
+      let statut = 'sain';
+      if (soldeFin < 0) statut = 'deficit';
+      else if (soldeFin < chargesPersonnelMois) statut = 'alerte';
+
+      projections.push({
+        index: i,
+        mois: label,
+        isCurrent: i === 0,
+        soldeDebut,
+        encaissements: {
+          recouvrementClients: encaissementClients,
+          ventesPrevisionnelles: ventesMois,
+          total: totalEncaissements
+        },
+        decaissements: {
+          fournisseurs: decaissementFournisseurs,
+          salaires,
+          chargesExternes,
+          impotsTaxes: impots,
+          total: totalDecaissements
+        },
+        variationNette,
+        soldeFin,
+        statut
+      });
+    }
+
+    const aiRecommendations = [];
+    const minSolde = Math.min(...projections.map(p => p.soldeFin));
+    if (minSolde < 0) {
+      aiRecommendations.push({
+        type: 'danger',
+        titre: 'Alerte Trésorerie Négative',
+        message: 'Un déficit de trésorerie est projeté dans les prochains mois. Action prioritaire : accélérer le recouvrement des créances échues et négocier un échelonnement avec les 3 principaux fournisseurs.'
+      });
+    } else if (minSolde < chargesPersonnelMois) {
+      aiRecommendations.push({
+        type: 'warning',
+        titre: 'Matelas de Sécurité Cash Limité',
+        message: 'Le solde prévisionnel passera sous le seuil d\'un mois de masse salariale. Il est recommandé de surveiller étroitement les décaissements et de sécuriser une ligne de trésorerie bancaire préventive.'
+      });
+    } else {
+      aiRecommendations.push({
+        type: 'success',
+        titre: 'Trajectoire de Trésorerie Maîtrisée',
+        message: 'Les prévisions de cash flow indiquent un solde de trésorerie net positif et sécurisé sur les 4 prochains mois. Capacité d\'autofinancement robuste.'
+      });
+    }
+
+    aiRecommendations.push({
+      type: 'info',
+      titre: 'Levier d\'Optimisation du BFR',
+      message: `En ramenant le délai de paiement client à 45 jours maximum, vous libéreriez environ ${new Intl.NumberFormat('fr-FR').format(Math.round(creancesClients * 0.25))} FCFA de liquidités immédiates.`
+    });
+
+    res.json({
+      soldeActuel: cashActuel,
+      creancesClients,
+      dettesFournisseurs,
+      projections,
+      aiRecommendations
+    });
+  } catch (err) {
+    console.error("Erreur cash forecast:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- DYNAMIC JOURNALS LIST ENDPOINT ---
 app.get('/api/journals-list', async (req, res) => {
   try {

@@ -637,6 +637,20 @@ async function initSchema() {
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_deleted_records_synced ON deleted_records(synced_at)`);
 
+  // Table Budgets (Contrôle Budgétaire & Écarts DAF)
+  await run(`CREATE TABLE IF NOT EXISTS budgets (
+    id TEXT PRIMARY KEY DEFAULT ${UUID_DEFAULT_SQL},
+    exercice_id TEXT,
+    compte_racine TEXT NOT NULL,
+    libelle TEXT NOT NULL,
+    type TEXT DEFAULT 'charge',
+    montant_alloue REAL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_budgets_exercice ON budgets(exercice_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_budgets_racine ON budgets(compte_racine)`);
+
   // Triggers automatiques de capture des suppressions
   await run(`CREATE TRIGGER IF NOT EXISTS trg_journal_delete AFTER DELETE ON journal
   BEGIN
