@@ -2530,8 +2530,8 @@ app.delete('/api/budgets/:id', async (req, res) => {
 // --- MODULE CASH FORECAST (PLAN DE TRÉSORERIE PRÉVISIONNEL DAF) ---
 app.get('/api/cash-forecast', async (req, res) => {
   try {
-    const rows = await getFinancialRows();
-    const fin = computeFinancials(rows || []);
+    const { rows, ranResultatRows } = await getFinancialRows();
+    const fin = computeFinancials(rows || [], ranResultatRows);
 
     const cashActuel = Math.max(0, fin.tresorerieActif - fin.tresoreriePassif);
     const caAnnuel = fin.ca || 0;
