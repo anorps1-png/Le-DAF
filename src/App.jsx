@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
-import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft, Trash2, PieChart } from 'lucide-react'
+import { LayoutDashboard, MessageSquare, FileText, Users, Landmark, Calculator, Settings, Bell, Search, BrainCircuit, Mic, Database, ShieldAlert, TrendingUp, ChevronDown, Plus, CalendarRange, RotateCcw, ArrowLeft, Trash2, PieChart, FolderOpen } from 'lucide-react'
 
 // Import Modules
 import { TiersModule } from './modules/TiersModule';
@@ -16,6 +16,37 @@ import { BudgetModule } from './modules/BudgetModule';
 import { CashForecastModule } from './modules/CashForecastModule';
 import { fetchDirectDashboardStats, fetchDirectSupabaseExercices } from './utils/supabaseClient';
 import { adminFetch } from './utils/adminAuth';
+
+// Indicateur permanent du dossier comptable actif (nom du fichier .sqlite ouvert), toujours
+// visible dans le header — quel que soit l'onglet et que l'appli tourne en Electron ou dans un
+// navigateur classique. Sert de repère fiable après un changement de dossier (multi-entreprises) :
+// le titre natif de la fenêtre Electron n'est pas toujours visible selon la configuration système,
+// et un onglet de navigateur classique ne montre de toute façon jamais ce titre-là.
+const ActiveFileIndicator = () => {
+  const [dbInfo, setDbInfo] = useState(null);
+
+  useEffect(() => {
+    fetch('/api/db/info').then(r => r.ok ? r.json() : null).then(setDbInfo).catch(() => {});
+  }, []);
+
+  if (!dbInfo || !dbInfo.name) return null;
+
+  return (
+    <div
+      title={`Dossier comptable actif : ${dbInfo.path || dbInfo.name}`}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '0.4rem',
+        padding: '0.45rem 0.85rem', borderRadius: 'var(--radius-md)',
+        background: 'var(--color-bg-light)', border: '1px solid var(--color-border)',
+        fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)',
+        whiteSpace: 'nowrap'
+      }}
+    >
+      <FolderOpen size={15} style={{ color: 'var(--color-primary)' }} />
+      {dbInfo.name}
+    </div>
+  );
+};
 
 // Sélecteur d'exercice comptable, visible en permanence dans le header : l'exercice actif est
 // une sélection globale côté serveur (voir server/index.js getActiveExercice), donc changer de
@@ -755,6 +786,7 @@ function App() {
           </div>
 
           <div className="header-actions">
+            <ActiveFileIndicator />
             <ExerciceSelector onChange={setActiveExerciceId} />
             <SyncHeaderStatus onClickSettings={() => navigateTo('settings')} />
 
