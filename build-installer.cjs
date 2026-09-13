@@ -2,6 +2,7 @@ const { execSync } = require('child_process');
 const innosetup = require('innosetup');
 const path = require('path');
 const fs = require('fs');
+const { version: APP_VERSION, productName: APP_NAME } = require('./package.json');
 
 console.log('[Installer Build] Étape 1/2 : Génération du dossier dépaqueté Electron...');
 execSync('npx electron-builder --win dir', { stdio: 'inherit' });
@@ -14,12 +15,12 @@ const issPath = path.resolve(__dirname, 'dist-electron', 'setup_script.iss');
 
 const issContent = `
 [Setup]
-AppName=Agent OHADA (Le-DAF)
-AppVersion=2.0.2
-AppPublisher=Agent OHADA
-DefaultDirName={autopf}\\Agent OHADA (Le-DAF)
-DefaultGroupName=Agent OHADA (Le-DAF)
-OutputBaseFilename=AgentOHADA-Setup-v2.0.2
+AppName=${APP_NAME}
+AppVersion=${APP_VERSION}
+AppPublisher=${APP_NAME}
+DefaultDirName={autopf}\\${APP_NAME}
+DefaultGroupName=${APP_NAME}
+OutputBaseFilename=AgentFinancier-Setup-v${APP_VERSION}
 OutputDir=${outputDir}
 Compression=lzma2/fast
 SolidCompression=yes
@@ -32,11 +33,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "${winUnpackedDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\\Agent OHADA (Le-DAF)"; Filename: "{app}\\Agent OHADA (Le-DAF).exe"
-Name: "{autodesktop}\\Agent OHADA (Le-DAF)"; Filename: "{app}\\Agent OHADA (Le-DAF).exe"; Tasks: desktopicon
+Name: "{group}\\${APP_NAME}"; Filename: "{app}\\${APP_NAME}.exe"
+Name: "{autodesktop}\\${APP_NAME}"; Filename: "{app}\\${APP_NAME}.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\\Agent OHADA (Le-DAF).exe"; Description: "{cm:LaunchProgram,Agent OHADA (Le-DAF)}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\\${APP_NAME}.exe"; Description: "{cm:LaunchProgram,${APP_NAME}}"; Flags: nowait postinstall skipifsilent
 `;
 
 fs.writeFileSync(issPath, issContent, 'utf8');
@@ -48,6 +49,6 @@ innosetup(issPath, { verbose: true }, (err) => {
   }
   console.log('----------------------------------------------------');
   console.log('✅ INSTALLATEUR GÉNÉRÉ AVEC SUCCÈS !');
-  console.log(` Fichier d'installation : ${path.join(outputDir, 'AgentOHADA-Setup-v2.0.2.exe')}`);
+  console.log(` Fichier d'installation : ${path.join(outputDir, 'AgentFinancier-Setup-v' + APP_VERSION + '.exe')}`);
   console.log('----------------------------------------------------');
 });

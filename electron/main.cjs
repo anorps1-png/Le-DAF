@@ -138,7 +138,7 @@ async function createWindow() {
     height: 920,
     minWidth: 1080,
     minHeight: 700,
-    title: `Agent OHADA (Le-DAF) — ${path.basename(process.env.DB_PATH, '.sqlite')}`,
+    title: `Agent financier — ${path.basename(process.env.DB_PATH, '.sqlite')}`,
     show: false,
     backgroundColor: '#0f172a',
     autoHideMenuBar: true,

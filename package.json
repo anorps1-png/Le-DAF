@@ -1,9 +1,9 @@
 {
   "name": "agent-ohada",
-  "productName": "Agent OHADA (Le-DAF)",
-  "description": "Agent OHADA (Le-DAF) — Pilotage Financier & Comptabilité OHADA",
+  "productName": "Agent financier",
+  "description": "Agent financier — Pilotage Financier & Comptabilité OHADA",
   "version": "2.0.2",
-  "author": "Agent OHADA",
+  "author": "Agent financier",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -48,7 +48,7 @@
   },
   "build": {
     "appId": "com.agentohada.app",
-    "productName": "Agent OHADA (Le-DAF)",
+    "productName": "Agent financier",
     "electronVersion": "34.0.0",
     "npmRebuild": false,
     "directories": {
@@ -81,8 +81,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Agent OHADA (Le-DAF)",
-      "artifactName": "AgentOHADA-Setup-v${version}.${ext}"
+      "shortcutName": "Agent financier",
+      "artifactName": "AgentFinancier-Setup-v${version}.${ext}"
     }
   }
 }

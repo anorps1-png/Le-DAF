@@ -3998,7 +3998,7 @@ function compareSemVer(v1, v2) {
 app.get('/api/system/version', (req, res) => {
   res.json({
     version: CURRENT_VERSION,
-    appName: 'Agent OHADA (Le-DAF)',
+    appName: 'Agent financier',
     isDesktop: !process.env.VERCEL,
     platform: process.platform,
     arch: process.arch
@@ -4046,7 +4046,7 @@ app.post('/api/system/apply-update', sensitiveLimiter, async (req, res) => {
     const { spawn } = require('child_process');
     const os = require('os');
 
-    const tempSetupPath = path.join(os.tmpdir(), `AgentOHADA-Setup-v${Date.now()}.exe`);
+    const tempSetupPath = path.join(os.tmpdir(), `AgentFinancier-Setup-v${Date.now()}.exe`);
     const fileStream = fs.createWriteStream(tempSetupPath);
 
     const download = (url, cb) => {

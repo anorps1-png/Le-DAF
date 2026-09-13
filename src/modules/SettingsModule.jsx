@@ -881,7 +881,7 @@ CREATE POLICY "Allow anonymous update access" ON public.business_rules FOR UPDAT
 
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border)' }}>
             <a 
-              href="https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentOHADA-Setup.exe" 
+              href="https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentFinancier-Setup.exe"
               className="btn btn-secondary"
               target="_blank" 
               rel="noreferrer"

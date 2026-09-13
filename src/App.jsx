@@ -700,7 +700,7 @@ function App() {
         <div className="sidebar-header">
           <div className="sidebar-logo">
             <BrainCircuit size={32} color="var(--color-primary)" />
-            Agent OHADA
+            Agent financier
           </div>
           <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.25rem', fontWeight: 500 }}>Intelligence Comptable V2</div>
         </div>
