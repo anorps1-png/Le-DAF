@@ -574,7 +574,14 @@ ${buildExerciceRule(activeExercice)}
 
 Instructions :
 - Règle N°1 : Rédige dès le premier coup des requêtes SQL ciblées et agrégées (SUM, COUNT, GROUP BY, WHERE précis) pour limiter les étapes et économiser les tokens.
-- Règle N°2 : Tu as le pouvoir de proposer TOUTE modification, saisie en partie double, lettrage, rééquilibrage ou correction via l'outil 'propose_update'. L'utilisateur devra obligatoirement l'approuver avant son exécution en base.
+- Règle N°2 : Tu as le pouvoir de proposer TOUTE modification, saisie en partie double, lettrage, rééquilibrage ou correction via l'outil 'propose_update' OU directement à la fin de ta réponse dans un bloc JSON balisé :
+\`\`\`proposal
+{
+  "sql": "Requête(s) SQL (séparées par des points-virgules pour une écriture en partie double)",
+  "reason": "Explication claire du motif comptable pour validation humaine"
+}
+\`\`\`
+Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'application pour afficher les boutons d'approbation. L'utilisateur devra obligatoirement approuver l'opération avant son exécution en base.
 - Règle N°3 : Pour les écritures en partie double (Débit + Crédit), inclus plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
 - Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.
 - Règle N°5 : L'outil 'propose_update' ne doit JAMAIS être utilisé pour une écriture datée en dehors de l'exercice ouvert précisé ci-dessus (le serveur la refuserait de toute façon) — dans ce cas, explique la limite à l'utilisateur au lieu d'appeler l'outil.`;
@@ -664,16 +671,23 @@ Instructions :
 
     let finalResponse = null;
     let iteration = 0;
-    const maxIterations = 6; // Valeur initiale économe en tokens
+    const maxIterations = 10; // Permet une analyse complète sans épuiser les tokens
 
     while (iteration < maxIterations && !finalResponse) {
       iteration++;
-      const isLastIteration = iteration >= maxIterations - 1;
+      const isLastIteration = iteration >= maxIterations;
+      // Sur la dernière itération, on n'autorise plus de requêtes de lecture (query_database)
+      // pour éviter les boucles infinies de lecture, mais on CONSERVE impérativement 'propose_update'
+      // afin que l'IA puisse soumettre la correction comptable finale à l'utilisateur.
+      const iterationTools = isLastIteration
+        ? tools.filter(t => t.function.name === 'propose_update')
+        : tools;
+
       const completion = await openai.chat.completions.create({
         messages: messages,
         model: selectedModel,
-        tools: isLastIteration ? undefined : tools,
-        tool_choice: isLastIteration ? undefined : "auto",
+        tools: iterationTools.length > 0 ? iterationTools : undefined,
+        tool_choice: iterationTools.length > 0 ? "auto" : undefined,
       });
 
       if (!completion || !completion.choices || !completion.choices[0]) {
@@ -742,14 +756,20 @@ Instructions :
             }
           } else if (toolCall.function.name === "propose_update") {
             try {
-              const args = JSON.parse(toolCall.function.arguments);
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
               let cleanSql = (args.sql || "").trim();
               cleanSql = cleanSql.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
               cleanSql = cleanSql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^--.*$/gm, '').trim();
               cleanSql = cleanSql.replace(/;\s*$/, '').trim();
               
+              const explanationText = (responseMessage.content && responseMessage.content.trim())
+                ? responseMessage.content.trim()
+                : (args.reason || "Je propose d'exécuter la correction suivante sur votre base de données :");
+
               finalResponse = {
-                text: args.reason || "Je propose d'exécuter la correction suivante sur votre base de données :",
+                text: explanationText,
                 proposal: {
                   sql: cleanSql,
                   reason: args.reason || "Mise à jour comptable conforme OHADA."

@@ -2,7 +2,7 @@
   "name": "agent-ohada",
   "productName": "Agent financier",
   "description": "Agent financier — Pilotage Financier & Comptabilité OHADA",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "author": "Agent financier",
   "private": true,
   "type": "module",

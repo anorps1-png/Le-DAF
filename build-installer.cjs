@@ -5,7 +5,8 @@ const fs = require('fs');
 const { version: APP_VERSION, productName: APP_NAME } = require('./package.json');
 
 console.log('[Installer Build] Étape 1/2 : Génération du dossier dépaqueté Electron...');
-execSync('npx electron-builder --win dir', { stdio: 'inherit' });
+const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+execSync(`${npxCmd} electron-builder --win dir`, { stdio: 'inherit' });
 
 console.log('[Installer Build] Étape 2/2 : Compilation de l\'installateur Windows (Setup EXE via InnoSetup)...');
 

@@ -1,6 +1,6 @@
 {
-  "version": "2.0.2",
-  "releaseDate": "2026-08-18",
+  "version": "2.0.3",
+  "releaseDate": "2026-09-23",
   "downloadUrl": "https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentFinancier-Setup.exe",
-  "releaseNotes": "Version 2.0.2 : Agent IA avec tous les pouvoirs de correction, saisie en partie double et audit sous autorisation humaine préalable. Nettoyage et assainissement SQL robustes."
+  "releaseNotes": "Version 2.0.3 : Correction du Cerveau IA pour la persistance de l'outil propose_update sur les analyses multi-tours et l'extraction des propositions comptables."
 }
