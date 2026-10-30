@@ -11,6 +11,7 @@ if (typeof globalThis.WebSocket === 'undefined') {
 }
 
 const { createClient } = require('@supabase/supabase-js');
+const path = require('path');
 const db = require('./db');
 
 let supabaseClient = null;
@@ -98,6 +99,26 @@ async function getSyncSettings() {
   }
 }
 
+// Détermine l'identifiant du dossier comptable actif pour le cloisonnement multi-dossiers dans Supabase
+async function getActiveDossierId() {
+  try {
+    const rows = await db.runSelect("SELECT value FROM settings WHERE key = 'DOSSIER_ID'");
+    if (rows && rows[0] && rows[0].value && rows[0].value.trim()) {
+      return rows[0].value.trim();
+    }
+  } catch (e) {}
+
+  try {
+    const current = db.getCurrentDbPath ? db.getCurrentDbPath() : (process.env.DB_PATH || '');
+    if (current) {
+      const base = path.basename(current, path.extname(current));
+      if (base) return base;
+    }
+  } catch (e) {}
+
+  return 'defaut';
+}
+
 // Initialise le client Supabase
 async function getSupabaseClient() {
   const { url, key } = await getSyncSettings();
@@ -166,9 +187,11 @@ async function withNetworkRetry(fn, { retries = 5, baseDelayMs = 2000, maxDelayM
 }
 
 // =========================================================================
-// OPERATEUR PUSH : Envoie les modifications locales vers Supabase
 // =========================================================================
-async function performPush() {
+// OPERATEUR PUSH : Envoie les modifications locales vers Supabase
+// Cloisonné par dossier comptable (dossier_id)
+// =========================================================================
+async function performPush(dossierIdOverride) {
   if (syncInProgress) {
     return { status: 'in_progress', message: 'Une opération de synchronisation est déjà en cours...' };
   }
@@ -177,6 +200,8 @@ async function performPush() {
   if (!client) {
     return { status: 'error', message: 'Impossible d\'initialiser la connexion Supabase.' };
   }
+
+  const dossierId = (dossierIdOverride && String(dossierIdOverride).trim()) || (await getActiveDossierId());
 
   syncInProgress = true;
   resetProgress('push');
@@ -192,7 +217,16 @@ async function performPush() {
     let unsyncedRules = [];
 
     try { pendingDeletes = (await db.runSelect("SELECT id, table_name, record_id FROM deleted_records WHERE synced_at IS NULL")) || []; } catch (e) {}
-    try { unsyncedJournal = (await db.runSelect("SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, created_at FROM journal WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
+    try {
+      unsyncedJournal = (await db.runSelect(`
+        SELECT id, code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference,
+               debit, credit, piece_id, statut_lettrage, code_lettrage, date_lettrage, auteur_lettrage,
+               date_echeance, date_reglement, mode_paiement, reference_banque, statut_validation, validateur,
+               date_validation, motif_rejet, centre_de_cout, tva_taux, tva_montant, piece_jointe, created_at
+        FROM journal
+        WHERE synced_at IS NULL OR updated_at > synced_at
+      `)) || [];
+    } catch (e) {}
     try { unsyncedTiers = (await db.runSelect("SELECT id, type, nom, compte_comptable, solde, statut FROM tiers WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
     try { unsyncedExercices = (await db.runSelect("SELECT id, libelle, date_debut, date_fin FROM exercices WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
     try { unsyncedAccounts = (await db.runSelect("SELECT compte, libelle, source_doc_id FROM chart_of_accounts WHERE synced_at IS NULL OR updated_at > synced_at")) || []; } catch (e) {}
@@ -201,12 +235,12 @@ async function performPush() {
     const totalToPush = pendingDeletes.length + unsyncedJournal.length + unsyncedTiers.length + unsyncedExercices.length + unsyncedAccounts.length + unsyncedRules.length;
 
     if (totalToPush === 0) {
-      const msg = "PUSH terminé : aucun élément local en attente d'envoi.";
+      const msg = `PUSH terminé (Dossier : ${dossierId}) : aucun élément local en attente d'envoi.`;
       finishProgress('success', msg, details);
-      return { status: 'success', pushedCount: 0, details, pendingCount: 0, timestamp: new Date().toISOString(), message: msg };
+      return { status: 'success', pushedCount: 0, details, pendingCount: 0, dossierId, timestamp: new Date().toISOString(), message: msg };
     }
 
-    updateProgress(`Analyse des éléments locaux (${totalToPush} en attente)...`, 0, totalToPush);
+    updateProgress(`Analyse des éléments locaux du dossier "${dossierId}" (${totalToPush} en attente)...`, 0, totalToPush);
 
     // 0) PUSH DELETES
     if (pendingDeletes.length > 0) {
@@ -221,15 +255,13 @@ async function performPush() {
         const idCol = (tbl === 'chart_of_accounts') ? 'compte' : 'id';
         const chunks = chunkArray(list, 500);
         for (const chunk of chunks) {
-          // record_id est toujours du texte (UUID pour journal/tiers/exercices/business_rules,
-          // code compte pour chart_of_accounts) : plus d'id numérique à convertir depuis la
-          // migration UUID.
           const idsToDelete = chunk.map(item => String(item.record_id));
-          const { error } = await withNetworkRetry(() => client.from(tbl).delete().in(idCol, idsToDelete));
+          const { error } = await withNetworkRetry(() => client.from(tbl).delete().in(idCol, idsToDelete).eq('dossier_id', dossierId));
 
           const deletedPayload = chunk.map(item => ({
             table_name: item.table_name,
             record_id: String(item.record_id),
+            dossier_id: dossierId,
             deleted_at: new Date().toISOString()
           }));
           try {
@@ -259,6 +291,7 @@ async function performPush() {
         updateProgress(`Push Journal (${journalPushed + chunk.length}/${unsyncedJournal.length})...`, pushedCount, totalToPush);
         const payload = chunk.map(r => ({
           id: r.id,
+          dossier_id: dossierId,
           code_journal: r.code_journal || '',
           poste_budgetaire: r.poste_budgetaire || '',
           date: r.date || '',
@@ -270,6 +303,22 @@ async function performPush() {
           debit: Number(r.debit) || 0,
           credit: Number(r.credit) || 0,
           piece_id: r.piece_id || null,
+          statut_lettrage: r.statut_lettrage || 'non_lettre',
+          code_lettrage: r.code_lettrage || null,
+          date_lettrage: r.date_lettrage || null,
+          auteur_lettrage: r.auteur_lettrage || null,
+          date_echeance: r.date_echeance || null,
+          date_reglement: r.date_reglement || null,
+          mode_paiement: r.mode_paiement || null,
+          reference_banque: r.reference_banque || null,
+          statut_validation: r.statut_validation || 'valide',
+          validateur: r.validateur || null,
+          date_validation: r.date_validation || null,
+          motif_rejet: r.motif_rejet || null,
+          centre_de_cout: r.centre_de_cout || null,
+          tva_taux: r.tva_taux != null ? Number(r.tva_taux) : null,
+          tva_montant: r.tva_montant != null ? Number(r.tva_montant) : null,
+          piece_jointe: r.piece_jointe || null,
           created_at: r.created_at || new Date().toISOString(),
           updated_at: new Date().toISOString()
         }));
@@ -297,6 +346,7 @@ async function performPush() {
         updateProgress(`Push Tiers (${tiersPushed + chunk.length}/${unsyncedTiers.length})...`, pushedCount, totalToPush);
         const payload = chunk.map(r => ({
           id: r.id,
+          dossier_id: dossierId,
           type: r.type || 'Client',
           nom: r.nom || '',
           compte_comptable: r.compte_comptable || '',
@@ -305,7 +355,8 @@ async function performPush() {
           updated_at: new Date().toISOString()
         }));
 
-        const { error } = await withNetworkRetry(() => client.from('tiers').upsert(payload, { onConflict: 'nom' }));
+        // Utilise 'id' comme clé de conflit primaire (UUID unique)
+        const { error } = await withNetworkRetry(() => client.from('tiers').upsert(payload, { onConflict: 'id' }));
         if (!error) {
           const ids = chunk.map(r => r.id);
           const placeholders = ids.map(() => '?').join(',');
@@ -325,6 +376,7 @@ async function performPush() {
       updateProgress(`Push Exercices (${unsyncedExercices.length})...`, pushedCount, totalToPush);
       const payload = unsyncedExercices.map(r => ({
         id: r.id,
+        dossier_id: dossierId,
         libelle: r.libelle,
         date_debut: r.date_debut,
         date_fin: r.date_fin,
@@ -347,11 +399,18 @@ async function performPush() {
       updateProgress(`Push Plan comptable (${unsyncedAccounts.length})...`, pushedCount, totalToPush);
       const payload = unsyncedAccounts.map(r => ({
         compte: r.compte,
+        dossier_id: dossierId,
         libelle: r.libelle,
         source_doc_id: r.source_doc_id || null,
         updated_at: new Date().toISOString()
       }));
-      const { error } = await withNetworkRetry(() => client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' }));
+
+      let { error } = await withNetworkRetry(() => client.from('chart_of_accounts').upsert(payload, { onConflict: 'dossier_id,compte' }));
+      if (error && error.message && error.message.includes('unique')) {
+        const fb = await withNetworkRetry(() => client.from('chart_of_accounts').upsert(payload, { onConflict: 'compte' }));
+        error = fb.error;
+      }
+
       if (!error) {
         const ids = unsyncedAccounts.map(r => r.compte);
         const placeholders = ids.map(() => '?').join(',');
@@ -367,6 +426,7 @@ async function performPush() {
       updateProgress(`Push Règles métier (${unsyncedRules.length})...`, pushedCount, totalToPush);
       const payload = unsyncedRules.map(r => ({
         id: r.id,
+        dossier_id: dossierId,
         pattern: r.pattern,
         condition_type: r.condition_type || 'contains',
         target_account: r.target_account,
@@ -389,7 +449,7 @@ async function performPush() {
       }
     }
 
-    const msg = `PUSH réussi : ${pushedCount} élément(s) envoyé(s) vers Supabase.`;
+    const msg = `PUSH réussi (Dossier : ${dossierId}) : ${pushedCount} élément(s) envoyé(s) vers Supabase.`;
     await db.runUpdate(
       "INSERT INTO sync_logs (status, pushed_count, pulled_count, message) VALUES (?, ?, ?, ?)",
       ['success', pushedCount, 0, msg]
@@ -400,6 +460,7 @@ async function performPush() {
 
     return {
       status: 'success',
+      dossierId,
       pushedCount,
       details,
       pendingCount: pending,
@@ -417,8 +478,9 @@ async function performPush() {
 
 // =========================================================================
 // OPERATEUR PULL : Télécharge les données depuis Supabase vers SQLite local
+// Cloisonné par dossier comptable (dossier_id)
 // =========================================================================
-async function performPull(force = false) {
+async function performPull(force = false, dossierIdOverride) {
   if (syncInProgress) {
     return { status: 'in_progress', message: 'Une opération de synchronisation est déjà en cours...' };
   }
@@ -428,18 +490,25 @@ async function performPull(force = false) {
     return { status: 'error', message: 'Impossible d\'initialiser la connexion Supabase.' };
   }
 
+  const dossierId = (dossierIdOverride && String(dossierIdOverride).trim()) || (await getActiveDossierId());
+  const isDefaultDossier = (dossierId === 'defaut' || !dossierId);
+
+  // Helper pour filtrer sur le dossier actif (ou inclure les enregistrements sans dossier_id pour le dossier par défaut)
+  const applyDossierFilter = (q) => {
+    if (isDefaultDossier) {
+      return q.or('dossier_id.eq.defaut,dossier_id.is.null');
+    }
+    return q.eq('dossier_id', dossierId);
+  };
+
   syncInProgress = true;
   resetProgress('pull');
   let pulledCount = 0;
   const details = {};
 
   try {
-    updateProgress('Téléchargement des suppressions distantes...', 5, 100);
-    // 0) PULL DELETES depuis Supabase. Ne rejoue que les suppressions plus récentes que le
-    // dernier pull réussi (comme le Journal via LAST_JOURNAL_PULL_AT) : sans ce filtre, un pull
-    // reconstruit et rejoue l'historique COMPLET des suppressions à chaque fois, y compris
-    // celles déjà appliquées, ce qui est à la fois inutile (table non paginée pouvant dépasser
-    // la limite par défaut de l'API) et risqué si un id est un jour réutilisé.
+    updateProgress(`Téléchargement des suppressions distantes (${dossierId})...`, 5, 100);
+    // 0) PULL DELETES depuis Supabase filtrées par dossier
     try {
       const lastDelPullRows = await db.runSelect("SELECT value FROM settings WHERE key = 'LAST_DELETES_PULL_AT'");
       const lastDelPullAt = force ? null : ((lastDelPullRows && lastDelPullRows[0]) ? lastDelPullRows[0].value : null);
@@ -450,7 +519,8 @@ async function performPull(force = false) {
       let latestDeletedAt = null;
 
       while (hasMore) {
-        let query = client.from('deleted_records').select('*').order('deleted_at', { ascending: true });
+        let query = client.from('deleted_records').select('*');
+        query = applyDossierFilter(query).order('deleted_at', { ascending: true });
         if (lastDelPullAt) query = query.gt('deleted_at', lastDelPullAt);
 
         const { data: remoteDeletes, error: delErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
@@ -490,8 +560,8 @@ async function performPull(force = false) {
       console.warn("Error PULL Deletes (table missing or query error):", e.message);
     }
 
-    // A) PULL Journal depuis Supabase (avec pagination)
-    updateProgress('Téléchargement du Journal comptable...', 15, 100);
+    // A) PULL Journal depuis Supabase (filtré par dossier_id)
+    updateProgress(`Téléchargement du Journal comptable (${dossierId})...`, 15, 100);
     try {
       const lastPullRows = await db.runSelect("SELECT value FROM settings WHERE key = 'LAST_JOURNAL_PULL_AT'");
       const lastPullAt = force ? null : ((lastPullRows && lastPullRows[0]) ? lastPullRows[0].value : null);
@@ -507,6 +577,7 @@ async function performPull(force = false) {
 
       while (hasMore) {
         let query = client.from('journal').select('*');
+        query = applyDossierFilter(query);
         if (localCount > 0 && lastPullAt) {
           query = query.gt('updated_at', lastPullAt).order('updated_at', { ascending: true });
         } else {
@@ -593,18 +664,18 @@ async function performPull(force = false) {
       console.error("Error PULL Journal:", e);
     }
 
-    // B) PULL Tiers avec pagination
-    updateProgress('Téléchargement des Tiers (Clients & Fournisseurs)...', 70, 100);
+    // B) PULL Tiers avec pagination (filtré par dossier_id)
+    updateProgress(`Téléchargement des Tiers (${dossierId})...`, 70, 100);
     try {
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
       let tiersPulled = 0;
       while (hasMore) {
-        const { data: remoteTiers, error: tErr } = await withNetworkRetry(() => client
-          .from('tiers')
-          .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1));
+        let query = client.from('tiers').select('*');
+        query = applyDossierFilter(query);
+
+        const { data: remoteTiers, error: tErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
 
         if (!tErr && Array.isArray(remoteTiers) && remoteTiers.length > 0) {
           const validRows = remoteTiers.filter(t => t.nom);
@@ -635,18 +706,18 @@ async function performPull(force = false) {
       console.error("Error PULL Tiers:", e);
     }
 
-    // C) PULL Exercices avec pagination
-    updateProgress('Téléchargement des Exercices comptables...', 82, 100);
+    // C) PULL Exercices avec pagination (filtré par dossier_id)
+    updateProgress(`Téléchargement des Exercices (${dossierId})...`, 82, 100);
     try {
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
       let exPulled = 0;
       while (hasMore) {
-        const { data: remoteExercices, error: exErr } = await withNetworkRetry(() => client
-          .from('exercices')
-          .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1));
+        let query = client.from('exercices').select('*');
+        query = applyDossierFilter(query);
+
+        const { data: remoteExercices, error: exErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
 
         if (!exErr && Array.isArray(remoteExercices) && remoteExercices.length > 0) {
           const validRows = remoteExercices.filter(ex => ex.libelle);
@@ -677,18 +748,18 @@ async function performPull(force = false) {
       console.error("Error PULL Exercices:", e);
     }
 
-    // D) PULL Chart of accounts avec pagination
-    updateProgress('Téléchargement du Plan Comptable SYSCOHADA...', 90, 100);
+    // D) PULL Chart of accounts avec pagination (filtré par dossier_id)
+    updateProgress(`Téléchargement Plan Comptable (${dossierId})...`, 90, 100);
     try {
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
       let acPulled = 0;
       while (hasMore) {
-        const { data: remoteAccounts, error: acErr } = await withNetworkRetry(() => client
-          .from('chart_of_accounts')
-          .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1));
+        let query = client.from('chart_of_accounts').select('*');
+        query = applyDossierFilter(query);
+
+        const { data: remoteAccounts, error: acErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
 
         if (!acErr && Array.isArray(remoteAccounts) && remoteAccounts.length > 0) {
           const validRows = remoteAccounts.filter(a => a.compte);
@@ -719,18 +790,18 @@ async function performPull(force = false) {
       console.error("Error PULL Accounts:", e);
     }
 
-    // E) PULL Business rules avec pagination
-    updateProgress('Téléchargement des Règles Métier & IA...', 96, 100);
+    // E) PULL Business rules avec pagination (filtré par dossier_id)
+    updateProgress(`Téléchargement Règles Métier (${dossierId})...`, 96, 100);
     try {
       let fromIdx = 0;
       const pageSize = 1000;
       let hasMore = true;
       let brPulled = 0;
       while (hasMore) {
-        const { data: remoteRules, error: brErr } = await withNetworkRetry(() => client
-          .from('business_rules')
-          .select('*')
-          .range(fromIdx, fromIdx + pageSize - 1));
+        let query = client.from('business_rules').select('*');
+        query = applyDossierFilter(query);
+
+        const { data: remoteRules, error: brErr } = await withNetworkRetry(() => query.range(fromIdx, fromIdx + pageSize - 1));
 
         if (!brErr && Array.isArray(remoteRules) && remoteRules.length > 0) {
           const validRows = remoteRules.filter(b => b.pattern);
@@ -761,7 +832,7 @@ async function performPull(force = false) {
       console.error("Error PULL Rules:", e);
     }
 
-    const msg = `PULL réussi : ${pulledCount} élément(s) téléchargé(s) depuis Supabase.`;
+    const msg = `PULL réussi (Dossier : ${dossierId}) : ${pulledCount} élément(s) téléchargé(s) depuis Supabase.`;
     await db.runUpdate(
       "INSERT INTO sync_logs (status, pushed_count, pulled_count, message) VALUES (?, ?, ?, ?)",
       ['success', 0, pulledCount, msg]
@@ -772,6 +843,7 @@ async function performPull(force = false) {
 
     return {
       status: 'success',
+      dossierId,
       pulledCount,
       details,
       pendingCount: pending,
@@ -788,17 +860,18 @@ async function performPull(force = false) {
 }
 
 // Synchronisation complète (PUSH puis PULL)
-async function performSync(force = false, isFullSync = false) {
-  const pushRes = await performPush();
-  const pullRes = await performPull(force || isFullSync);
+async function performSync(force = false, isFullSync = false, dossierIdOverride) {
+  const pushRes = await performPush(dossierIdOverride);
+  const pullRes = await performPull(force || isFullSync, dossierIdOverride);
 
   return {
     status: (pushRes.status === 'error' || pullRes.status === 'error') ? 'error' : 'success',
+    dossierId: pushRes.dossierId || pullRes.dossierId,
     pushedCount: pushRes.pushedCount || 0,
     pulledCount: pullRes.pulledCount || 0,
     pushDetails: pushRes.details || {},
     pullDetails: pullRes.details || {},
-    message: `Synchronisation manuelle : ${pushRes.pushedCount || 0} envoyé(s), ${pullRes.pulledCount || 0} téléchargé(s).`
+    message: `Synchronisation manuelle (Dossier : ${pushRes.dossierId || pullRes.dossierId || 'actif'}) : ${pushRes.pushedCount || 0} envoyé(s), ${pullRes.pulledCount || 0} téléchargé(s).`
   };
 }
 
@@ -829,6 +902,7 @@ async function ensureDatabaseHydrated(maxAgeMs = 60000) {
 }
 
 module.exports = {
+  getActiveDossierId,
   getSyncSettings,
   getSupabaseClient,
   getPendingLocalCount,

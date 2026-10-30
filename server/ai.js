@@ -4,6 +4,21 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 
+function getExportsDir() {
+  const isVercelServer = Boolean(process.env.VERCEL || process.env.NOW_BUILDER || process.env.VERCEL_ENV);
+  if (isVercelServer) {
+    return path.join('/tmp', 'exports');
+  }
+  if (process.env.USER_DATA_PATH) {
+    return path.join(process.env.USER_DATA_PATH, 'exports');
+  }
+  if (__dirname.includes('app.asar')) {
+    const os = require('os');
+    return path.join(os.homedir(), '.agent-financier', 'exports');
+  }
+  return path.join(__dirname, 'public', 'exports');
+}
+
 async function getSettings() {
   return new Promise((resolve) => {
     db.all("SELECT key, value FROM settings", (err, rows) => {
@@ -584,7 +599,8 @@ Instructions :
 Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'application pour afficher les boutons d'approbation. L'utilisateur devra obligatoirement approuver l'opération avant son exécution en base.
 - Règle N°3 : Pour les écritures en partie double (Débit + Crédit), inclus plusieurs requêtes INSERT séparées par des points-virgules dans 'sql'.
 - Règle N°4 : Réponds de manière concise, rigoureuse et professionnelle avec des tableaux Markdown.
-- Règle N°5 : L'outil 'propose_update' ne doit JAMAIS être utilisé pour une écriture datée en dehors de l'exercice ouvert précisé ci-dessus (le serveur la refuserait de toute façon) — dans ce cas, explique la limite à l'utilisateur au lieu d'appeler l'outil.`;
+- Règle N°5 : L'outil 'propose_update' ne doit JAMAIS être utilisé pour une écriture datée en dehors de l'exercice ouvert précisé ci-dessus (le serveur la refuserait de toute façon) — dans ce cas, explique la limite à l'utilisateur au lieu d'appeler l'outil.
+- Règle N°6 : Tu as désormais un accès complet au système de l'utilisateur via les outils 'view_file', 'write_to_file', et 'run_command'. Tu peux l'aider à coder, scripter, ou administrer son poste. Agis avec prudence.`;
 
     const tools = [
       {
@@ -644,6 +660,49 @@ Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'appl
               filename: { type: "string", description: "Le nom souhaité pour le fichier PDF. Ex: balance_mai.pdf" }
             },
             required: ["sql", "title", "filename"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "view_file",
+          description: "Lit le contenu d'un fichier local sur l'ordinateur.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Le chemin absolu ou relatif du fichier à lire." }
+            },
+            required: ["path"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "write_to_file",
+          description: "Crée un nouveau fichier ou écrase un fichier existant avec du nouveau contenu.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Le chemin du fichier." },
+              content: { type: "string", description: "Le contenu à écrire dans le fichier." }
+            },
+            required: ["path", "content"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "run_command",
+          description: "Exécute une commande shell/terminal sur l'ordinateur de l'utilisateur. Attention: c'est une action directe sur le système.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: { type: "string", description: "La commande à exécuter (ex: npm run build, dir, etc.)" }
+            },
+            required: ["command"]
           }
         }
       }
@@ -780,30 +839,40 @@ Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'appl
             }
           } else if (toolCall.function.name === "generate_excel") {
             try {
-              const args = JSON.parse(toolCall.function.arguments);
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
               const rows = await db.runSelect(args.sql);
               
-              const filename = args.filename || `export_${Date.now()}.xlsx`;
-              const exportPath = path.join(__dirname, 'public', 'exports');
+              const rawFilename = (args.filename || `export_${Date.now()}.xlsx`).replace(/[/\\]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '_');
+              const filename = rawFilename.endsWith('.xlsx') ? rawFilename : `${rawFilename}.xlsx`;
+              const exportPath = getExportsDir();
               if (!fs.existsSync(exportPath)) {
                 fs.mkdirSync(exportPath, { recursive: true });
               }
               
               const fullPath = path.join(exportPath, filename);
               const xlsx = require('xlsx');
-              const ws = xlsx.utils.json_to_sheet(rows);
+              const ws = xlsx.utils.json_to_sheet(rows || []);
               const wb = xlsx.utils.book_new();
               xlsx.utils.book_append_sheet(wb, ws, "Données");
               xlsx.writeFile(wb, fullPath);
               
-              const downloadUrl = `http://localhost:3001/public/exports/${filename}`;
+              const port = process.env.PORT || 3003;
+              const downloadUrl = `http://localhost:${port}/public/exports/${filename}`;
               messages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
                 name: toolCall.function.name,
-                content: JSON.stringify({ success: true, downloadUrl })
+                content: JSON.stringify({ 
+                  success: true, 
+                  downloadUrl, 
+                  localPath: fullPath,
+                  message: `Fichier Excel généré (${(rows || []).length} lignes) : ${filename}` 
+                })
               });
             } catch (err) {
+              console.error("[AI] Erreur generate_excel:", err);
               messages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
@@ -813,11 +882,14 @@ Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'appl
             }
           } else if (toolCall.function.name === "generate_pdf") {
             try {
-              const args = JSON.parse(toolCall.function.arguments);
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
               const rows = await db.runSelect(args.sql);
               
-              const filename = args.filename || `rapport_${Date.now()}.pdf`;
-              const exportPath = path.join(__dirname, 'public', 'exports');
+              const rawFilename = (args.filename || `rapport_${Date.now()}.pdf`).replace(/[/\\]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '_');
+              const filename = rawFilename.endsWith('.pdf') ? rawFilename : `${rawFilename}.pdf`;
+              const exportPath = getExportsDir();
               if (!fs.existsSync(exportPath)) {
                 fs.mkdirSync(exportPath, { recursive: true });
               }
@@ -826,42 +898,85 @@ Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'appl
               const PDFDocument = require('pdfkit');
               const doc = new PDFDocument({ margin: 30, size: 'A4' });
               const stream = fs.createWriteStream(fullPath);
-              doc.pipe(stream);
               
-              doc.fontSize(16).text(args.title || "Rapport Financier", { align: 'center' });
-              doc.moveDown();
-              
-              if (rows.length > 0) {
-                const headers = Object.keys(rows[0]);
-                let y = doc.y;
-                doc.fontSize(10).font('Helvetica-Bold');
-                headers.forEach((h, i) => {
-                  doc.text(h, 30 + i * 80, y);
-                });
-                doc.moveDown();
-                doc.font('Helvetica');
+              await new Promise((resolve, reject) => {
+                stream.on('finish', resolve);
+                stream.on('error', reject);
+                doc.on('error', reject);
                 
-                rows.slice(0, 30).forEach(r => {
-                  y = doc.y;
+                doc.pipe(stream);
+                
+                doc.fontSize(16).text(args.title || "Rapport Financier", { align: 'center' });
+                doc.moveDown();
+                
+                if (rows && rows.length > 0) {
+                  const headers = Object.keys(rows[0]);
+                  let y = doc.y;
+                  doc.fontSize(10).font('Helvetica-Bold');
+                  const colWidth = Math.max(50, Math.floor((doc.page.width - 60) / Math.max(headers.length, 1)));
                   headers.forEach((h, i) => {
-                    doc.text(String(r[h] || ''), 30 + i * 80, y);
+                    if (30 + i * colWidth < doc.page.width - 30) {
+                      doc.text(String(h).substring(0, 20), 30 + i * colWidth, y, { width: colWidth - 5, ellipsis: true });
+                    }
                   });
-                  doc.moveDown(0.5);
-                });
-              } else {
-                doc.text("Aucune donnée trouvée.");
-              }
+                  doc.moveDown();
+                  doc.font('Helvetica').fontSize(9);
+                  
+                  rows.slice(0, 100).forEach(r => {
+                    if (doc.y > doc.page.height - 50) {
+                      doc.addPage();
+                    }
+                    y = doc.y;
+                    headers.forEach((h, i) => {
+                      if (30 + i * colWidth < doc.page.width - 30) {
+                        doc.text(String(r[h] ?? ''), 30 + i * colWidth, y, { width: colWidth - 5, ellipsis: true });
+                      }
+                    });
+                    doc.moveDown(0.5);
+                  });
+                } else {
+                  doc.text("Aucune donnée trouvée.");
+                }
+                
+                doc.end();
+              });
               
-              doc.end();
-              
-              await new Promise((resolve) => stream.on('finish', resolve));
-              
-              const downloadUrl = `http://localhost:3001/public/exports/${filename}`;
+              const port = process.env.PORT || 3003;
+              const downloadUrl = `http://localhost:${port}/public/exports/${filename}`;
               messages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
                 name: toolCall.function.name,
-                content: JSON.stringify({ success: true, downloadUrl })
+                content: JSON.stringify({ 
+                  success: true, 
+                  downloadUrl, 
+                  localPath: fullPath,
+                  message: `Rapport PDF généré : ${filename}` 
+                })
+              });
+            } catch (err) {
+              console.error("[AI] Erreur generate_pdf:", err);
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: JSON.stringify({ error: err.message })
+              });
+            }
+          } else if (toolCall.function.name === "view_file") {
+            try {
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
+              if (!fs.existsSync(args.path)) {
+                throw new Error(`Le fichier n'existe pas : ${args.path}`);
+              }
+              const fileContent = fs.readFileSync(args.path, 'utf-8');
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: fileContent.substring(0, 40000) // Limit size to avoid token limit errors
               });
             } catch (err) {
               messages.push({
@@ -869,6 +984,60 @@ Ce bloc ou l'appel à 'propose_update' sera automatiquement détecté par l'appl
                 tool_call_id: toolCall.id,
                 name: toolCall.function.name,
                 content: JSON.stringify({ error: err.message })
+              });
+            }
+          } else if (toolCall.function.name === "write_to_file") {
+            try {
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
+              const dir = path.dirname(args.path);
+              if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+              }
+              fs.writeFileSync(args.path, args.content, 'utf-8');
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: JSON.stringify({ success: true, message: `Fichier ${args.path} écrit avec succès.` })
+              });
+            } catch (err) {
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: JSON.stringify({ error: err.message })
+              });
+            }
+          } else if (toolCall.function.name === "run_command") {
+            try {
+              const args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
+              const { exec } = require('child_process');
+              const util = require('util');
+              const execPromise = util.promisify(exec);
+              const { stdout, stderr } = await execPromise(args.command, { timeout: 60000 });
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: JSON.stringify({ 
+                  stdout: (stdout || '').toString().substring(0, 10000), 
+                  stderr: (stderr || '').toString().substring(0, 10000) 
+                })
+              });
+            } catch (err) {
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+                content: JSON.stringify({ 
+                  error: err.message, 
+                  stdout: (err.stdout || '').toString().substring(0, 5000), 
+                  stderr: (err.stderr || '').toString().substring(0, 5000) 
+                })
               });
             }
           }

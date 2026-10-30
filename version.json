@@ -1,6 +1,6 @@
 {
-  "version": "2.0.3",
-  "releaseDate": "2026-09-23",
+  "version": "2.0.6",
+  "releaseDate": "2026-10-14",
   "downloadUrl": "https://github.com/anorps1-png/Le-DAF/releases/latest/download/AgentFinancier-Setup.exe",
-  "releaseNotes": "Version 2.0.3 : Correction du Cerveau IA pour la persistance de l'outil propose_update sur les analyses multi-tours et l'extraction des propositions comptables."
+  "releaseNotes": "Version 2.0.6 : Saisie Express Factures & Règlements en 1 clic, import direct et équilibrage automatique de partie double SYSCOHADA, et enrichissement des outils du Cerveau IA."
 }

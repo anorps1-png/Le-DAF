@@ -8,8 +8,10 @@ const fs = require('fs');
 // La limite par défaut (~2,2 Go sur une machine à mémoire modeste) est trop juste pour un import
 // comptable de plusieurs centaines de milliers à ~1,5M de lignes (fichier Excel entier tenu en
 // mémoire, plusieurs copies du tableau de lignes le temps du traitement). Doit être fait AVANT
-// app.whenReady().
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
+// Limite mémoire V8 : 4096 Mo sur 64-bit, adaptée à 1400 Mo sur système 32-bit (ia32)
+// pour éviter le crash au démarrage dû à l'espace d'adressage virtuel restreint (2-3 Go max).
+const is32Bit = process.arch === 'ia32';
+app.commandLine.appendSwitch('js-flags', is32Bit ? '--max-old-space-size=1400' : '--max-old-space-size=4096');
 
 let mainWindow = null;
 const PORT = process.env.PORT || 3003;

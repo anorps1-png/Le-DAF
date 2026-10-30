@@ -61,15 +61,26 @@ export const OHADA_PLAN = {
   "89": "IMPÔTS SUR LE RÉSULTAT"
 };
 
+// Nettoie les libellés bruts (guillemets superflus, tirets de fin, astérisques d'import)
+export const cleanAccountLabel = (raw) => {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/^["'\s*]+/, '')
+    .replace(/["'\s*-]+$/, '')
+    .replace(/["']+/g, '')
+    .trim();
+};
+
 // Le plan comptable personnalisé (customAccounts, extrait des documents de la Mémoire Métier)
 // prime sur le plan OHADA par défaut, qui ne sert plus que de filet de sécurité.
 export const getAccountLabel = (compteStr, customAccounts = {}) => {
   const str = String(compteStr);
-  if (customAccounts[str]) return customAccounts[str];
+  if (customAccounts[str]) return cleanAccountLabel(customAccounts[str]);
   for (let i = str.length; i >= 2; i--) {
     const prefix = str.substring(0, i);
-    if (customAccounts[prefix]) return customAccounts[prefix];
+    if (customAccounts[prefix]) return cleanAccountLabel(customAccounts[prefix]);
     if (OHADA_PLAN[prefix]) return OHADA_PLAN[prefix];
   }
   return `COMPTE ${str}`;
 };
+

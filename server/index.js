@@ -28,7 +28,7 @@ try {
 const db = require('./db');
 const { askAI, matchTransactionWithMemory, learnFromJournalData, friendlyAiErrorMessage } = require('./ai');
 const { computeEtatsFinanciers } = require('./ohadaRules');
-const { getSyncSettings, getPendingLocalCount, getSyncProgress, performPush, performPull, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
+const { getActiveDossierId, getSyncSettings, getPendingLocalCount, getSyncProgress, performPush, performPull, performSync, ensureDatabaseHydrated, startAutoSyncCron } = require('./supabaseSync');
 
 const path = require('path');
 const fs = require('fs');
@@ -84,10 +84,15 @@ if (isVercelServer) {
   });
 }
 
-// Serve public/exports directory for generated files
+// Serve public/exports directory for generated files (PDF, Excel, rapports IA)
+// Ne jamais baser ce dossier d'écriture sur __dirname en Electron packagé (app.asar est en lecture seule)
 const exportsDir = isVercelServer
   ? path.join('/tmp', 'exports')
-  : path.join(__dirname, 'public', 'exports');
+  : (process.env.USER_DATA_PATH
+      ? path.join(process.env.USER_DATA_PATH, 'exports')
+      : (__dirname.includes('app.asar')
+          ? path.join(require('os').homedir(), '.agent-financier', 'exports')
+          : path.join(__dirname, 'public', 'exports')));
 
 try {
   if (!fs.existsSync(exportsDir)) {
@@ -96,11 +101,18 @@ try {
 } catch (e) {
   // Ignorer si filesystem restreint
 }
-app.use(express.static(path.join(__dirname, 'public')));
+app.use('/public/exports', express.static(exportsDir));
+app.use('/exports', express.static(exportsDir));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 app.use('/public', express.static(path.join(__dirname, 'public')));
-if (isVercelServer) {
-  app.use('/public/exports', express.static(exportsDir));
-}
 
 const ALLOWED_UPLOAD_EXTENSIONS = new Set(['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt']);
 // Un modèle journal SYSCOHADA de plusieurs centaines de milliers de lignes (import comptable
@@ -276,12 +288,47 @@ app.post('/api/exercices', (req, res) => {
 app.delete('/api/exercices/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const exRows = await db.runSelect("SELECT * FROM exercices WHERE id = ?", [id]);
+    const ex = exRows && exRows[0];
+
+    let deletedJournalCount = 0;
+    if (ex) {
+      // 1. Récupérer toutes les écritures rattachées à cet exercice (bornes date_debut et date_fin)
+      const attachedEntries = await db.runSelect(
+        "SELECT id FROM journal WHERE date >= ? AND date <= ?",
+        [ex.date_debut, ex.date_fin]
+      );
+
+      // 2. Traçabilité des suppressions pour la synchronisation Supabase Cloud
+      for (const entry of (attachedEntries || [])) {
+        await db.runUpdate("INSERT INTO deleted_records (table_name, record_id) VALUES ('journal', ?)", [entry.id]);
+      }
+      await db.runUpdate("INSERT INTO deleted_records (table_name, record_id) VALUES ('exercices', ?)", [id]);
+
+      // 3. Suppression des écritures comptables du journal rattachées à cet exercice
+      const delJournalRes = await db.runUpdate(
+        "DELETE FROM journal WHERE date >= ? AND date <= ?",
+        [ex.date_debut, ex.date_fin]
+      );
+      deletedJournalCount = (delJournalRes && delJournalRes.changes) || (attachedEntries ? attachedEntries.length : 0);
+
+      // 4. Suppression des budgets associés à cet exercice
+      await db.runUpdate("DELETE FROM budgets WHERE exercice_id = ?", [id]);
+    }
+
+    // 5. Suppression de l'exercice lui-même
     await db.runUpdate("DELETE FROM exercices WHERE id = ?", [id]);
+
     const active = await getActiveExercice();
     if (active && String(active.id) === String(id)) {
       await db.runUpdate("UPDATE settings SET value = '' WHERE key = 'SELECTED_EXERCICE_ID'");
     }
-    res.json({ success: true });
+
+    res.json({
+      success: true,
+      message: `Exercice "${ex ? ex.libelle : id}" et ses ${deletedJournalCount} écriture(s) rattachée(s) supprimés avec succès.`,
+      deletedJournalCount
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -471,11 +518,12 @@ app.post('/api/db/switch', sensitiveLimiter, async (req, res) => {
     // Restreint aux chemins déjà connus (ouverts/créés via ces mêmes routes) plutôt qu'un chemin
     // arbitraire fourni par le client, pour ne pas laisser une requête forgée pointer la connexion
     // active vers un fichier quelconque du poste.
-    const known = db.getDbRegistry().some(e => e.path === targetPath);
-    if (!known || !fs.existsSync(targetPath)) {
+    const normalizedTarget = path.resolve(targetPath);
+    const known = db.getDbRegistry().some(e => e.path && path.resolve(e.path).toLowerCase() === normalizedTarget.toLowerCase());
+    if (!known || !fs.existsSync(normalizedTarget)) {
       return res.status(404).json({ error: 'Fichier comptable introuvable ou inconnu.' });
     }
-    await db.switchDatabase(targetPath);
+    await db.switchDatabase(normalizedTarget);
     res.json({ success: true, name: path.basename(targetPath, path.extname(targetPath)), path: targetPath });
   } catch (e) {
     res.status(500).json({ error: `Impossible de changer de fichier comptable : ${e.message}` });
@@ -527,10 +575,33 @@ function normalizeDate(value) {
     return value.toISOString().split('T')[0];
   }
 
+  // Si c'est un nombre entier représentant une date compacte (ex: 280826 ou 28082026)
   if (typeof value === 'number') {
-    // Numéro de série Excel (jours écoulés depuis le 30/12/1899, avec le bug de l'an 1900).
-    const excelEpoch = Date.UTC(1899, 11, 30);
-    return new Date(excelEpoch + value * 86400000).toISOString().split('T')[0];
+    const numStr = String(Math.floor(value));
+    // 6 chiffres : JJMMYY (ex: 280826 -> 2026-08-28)
+    if (numStr.length === 6) {
+      const dd = numStr.substring(0, 2);
+      const mm = numStr.substring(2, 4);
+      const yy = numStr.substring(4, 6);
+      const yyyy = parseInt(yy, 10) < 50 ? `20${yy}` : `19${yy}`;
+      if (parseInt(mm, 10) >= 1 && parseInt(mm, 10) <= 12 && parseInt(dd, 10) >= 1 && parseInt(dd, 10) <= 31) {
+        return `${yyyy}-${mm}-${dd}`;
+      }
+    }
+    // 8 chiffres : JJMMYYYY (ex: 28082026 -> 2026-08-28)
+    if (numStr.length === 8) {
+      const dd = numStr.substring(0, 2);
+      const mm = numStr.substring(2, 4);
+      const yyyy = numStr.substring(4, 8);
+      if (parseInt(mm, 10) >= 1 && parseInt(mm, 10) <= 12 && parseInt(dd, 10) >= 1 && parseInt(dd, 10) <= 31) {
+        return `${yyyy}-${mm}-${dd}`;
+      }
+    }
+    // Numéro de série Excel authentique (entre 1 et 75000, soit ~1900 à ~2105)
+    if (value > 0 && value < 75000) {
+      const excelEpoch = Date.UTC(1899, 11, 30);
+      return new Date(excelEpoch + value * 86400000).toISOString().split('T')[0];
+    }
   }
 
   const str = String(value).trim();
@@ -539,6 +610,12 @@ function normalizeDate(value) {
   if (m) {
     const [, dd, mm, yy] = m;
     const yyyy = parseInt(yy, 10) < 50 ? `20${yy}` : `19${yy}`;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  m = str.match(/^(\d{2})(\d{2})(\d{4})$/); // DDMMYYYY sans séparateur
+  if (m) {
+    const [, dd, mm, yyyy] = m;
     return `${yyyy}-${mm}-${dd}`;
   }
 
@@ -771,6 +848,7 @@ function parseSageJournalRows(workbook) {
 // identiques.
 function journalRowFingerprint(r) {
   return [
+    String(r.code_journal || '').trim().toUpperCase(),
     String(r.date || ''),
     String(r.compte || '').trim(),
     String(r.compte_tiers || '').trim().toLowerCase(),
@@ -801,10 +879,10 @@ async function dedupeJournalRows(rows, { skipIntraBatchDedup = false } = {}) {
   try {
     existing = minDate && maxDate
       ? await db.runSelect(
-          `SELECT date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal WHERE date >= ? AND date <= ?`,
+          `SELECT code_journal, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal WHERE date >= ? AND date <= ?`,
           [minDate, maxDate]
         )
-      : await db.runSelect(`SELECT date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal`, []);
+      : await db.runSelect(`SELECT code_journal, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit FROM journal`, []);
   } catch (e) {
     existing = [];
   }
@@ -962,8 +1040,13 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
           const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || parseFloat(normRow['debits']) || 0;
           const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || parseFloat(normRow['credits']) || 0;
 
-          if (compte || debit > 0 || credit > 0) {
-            journalRows.push({ code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit });
+          let effectiveCompte = compte;
+          if (effectiveCompte === '70690000' && String(libelle || '').toUpperCase().includes('HORS FACTURE')) {
+            effectiveCompte = '41111000';
+          }
+
+          if (effectiveCompte || debit > 0 || credit > 0) {
+            journalRows.push({ code_journal, poste_budgetaire, date, compte: effectiveCompte, compte_tiers, libelle, n_facture, reference, debit, credit });
           }
       });
 
@@ -1011,7 +1094,7 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       }
 
       // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
-      const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
+      const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows, { skipIntraBatchDedup: true });
 
       try {
         await insertJournalRowsChunked(dedupedRows);
@@ -1361,8 +1444,13 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
         const debit = parseFloat(normRow['debit']) || parseFloat(normRow['montantdebit']) || parseFloat(normRow['debits']) || 0;
         const credit = parseFloat(normRow['credit']) || parseFloat(normRow['montantcredit']) || parseFloat(normRow['credits']) || 0;
 
-        if (compte || debit > 0 || credit > 0) {
-          journalRows.push({ code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit });
+        let effectiveCompte = compte;
+        if (effectiveCompte === '70690000' && String(libelle || '').toUpperCase().includes('HORS FACTURE')) {
+          effectiveCompte = '41111000';
+        }
+
+        if (effectiveCompte || debit > 0 || credit > 0) {
+          journalRows.push({ code_journal, poste_budgetaire, date, compte: effectiveCompte, compte_tiers, libelle, n_facture, reference, debit, credit });
           totalDebit += debit;
           totalCredit += credit;
         }
@@ -1418,7 +1506,7 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
     }
 
     // Empêche qu'un fichier déjà importé (en tout ou partie) ne double les écritures en base.
-    const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows);
+    const { rows: dedupedRows, duplicates: duplicateCount } = await dedupeJournalRows(finalRows, { skipIntraBatchDedup: true });
 
     try {
       await insertJournalRowsChunked(dedupedRows);
@@ -1449,55 +1537,141 @@ app.post('/api/import/auto-fix-and-import', handleFileUpload, async (req, res) =
 });
 
 // --- DATA ROUTES (TIERS & JOURNAL) ---
-// Unifie les deux sources de tiers qui existaient séparément : le répertoire importé/saisi
-// (table `tiers`) et les comptes 40/41 vus dans le journal sans fiche tiers correspondante.
-// Le solde d'un tiers déjà présent dans `tiers` est toujours recalculé depuis le journal
-// (jamais la valeur statique importée) pour ne jamais afficher un solde périmé.
+// Fournit la situation financière exacte de chaque tiers (Clients & Fournisseurs) :
+// Total facturé, total réglé, solde net dû, taux de règlement, écritures non lettrées et dernière activité.
 app.get('/api/tiers', async (req, res) => {
   try {
     const { clause, params } = await getExerciceDateFilter();
     const exFilter = clause ? `AND ${clause}` : '';
-    const rows = await db.runSelect(`
+    const rawRows = await db.runSelect(`
       SELECT
         t.id as id,
         t.nom as nom,
-        t.compte_comptable as compte_comptable,
-        COALESCE(j.solde, t.solde, 0) as solde,
+        COALESCE(NULLIF(t.compte_comptable, ''), j.compte_comptable) as compte_comptable,
+        COALESCE(j.total_debit, 0) as total_debit,
+        COALESCE(j.total_credit, 0) as total_credit,
+        COALESCE(j.solde, t.solde, 0) as solde_brut,
+        COALESCE(j.nb_ecritures, 0) as nb_ecritures,
+        COALESCE(j.nb_non_lettres, 0) as nb_non_lettres,
+        COALESCE(j.montant_non_lettre, 0) as montant_non_lettre,
+        j.derniere_date as derniere_date,
         t.type as type
       FROM tiers t
       LEFT JOIN (
-        SELECT compte_tiers, SUM(debit) - SUM(credit) as solde
+        SELECT 
+          UPPER(TRIM(compte_tiers)) as ct_norm, 
+          MAX(compte) as compte_comptable,
+          SUM(debit) as total_debit, 
+          SUM(credit) as total_credit,
+          SUM(debit) - SUM(credit) as solde,
+          COUNT(*) as nb_ecritures,
+          SUM(CASE WHEN statut_lettrage != 'lettre' THEN 1 ELSE 0 END) as nb_non_lettres,
+          SUM(CASE WHEN statut_lettrage != 'lettre' THEN ABS(debit - credit) ELSE 0 END) as montant_non_lettre,
+          MAX(date) as derniere_date
         FROM journal
-        WHERE compte_tiers IS NOT NULL AND compte_tiers != '' ${exFilter}
-        GROUP BY compte_tiers
-      ) j ON UPPER(TRIM(j.compte_tiers)) = UPPER(TRIM(t.nom))
+        WHERE compte_tiers IS NOT NULL AND TRIM(compte_tiers) != '' 
+          AND (compte LIKE '4%')
+          AND (compte NOT LIKE '44%')
+          ${exFilter}
+        GROUP BY UPPER(TRIM(compte_tiers))
+      ) j ON j.ct_norm = UPPER(TRIM(t.nom))
+      WHERE (t.compte_comptable IS NULL OR (t.compte_comptable LIKE '4%' AND t.compte_comptable NOT LIKE '44%'))
 
       UNION ALL
 
       SELECT
-        compte_tiers as id,
-        compte_tiers as nom,
+        TRIM(compte_tiers) as id,
+        TRIM(compte_tiers) as nom,
         MAX(compte) as compte_comptable,
-        (SUM(debit) - SUM(credit)) as solde,
+        SUM(debit) as total_debit,
+        SUM(credit) as total_credit,
+        (SUM(debit) - SUM(credit)) as solde_brut,
+        COUNT(*) as nb_ecritures,
+        SUM(CASE WHEN statut_lettrage != 'lettre' THEN 1 ELSE 0 END) as nb_non_lettres,
+        SUM(CASE WHEN statut_lettrage != 'lettre' THEN ABS(debit - credit) ELSE 0 END) as montant_non_lettre,
+        MAX(date) as derniere_date,
         CASE WHEN substr(MAX(compte), 1, 2) = '41' THEN 'Client' ELSE 'Fournisseur' END as type
       FROM journal
-      WHERE compte_tiers IS NOT NULL AND compte_tiers != ''
-        AND (compte LIKE '40%' OR compte LIKE '41%')
-        AND UPPER(TRIM(compte_tiers)) NOT IN (SELECT UPPER(TRIM(nom)) FROM tiers)
+      WHERE compte_tiers IS NOT NULL AND TRIM(compte_tiers) != ''
+        AND (compte LIKE '4%')
+        AND (compte NOT LIKE '44%')
+        AND UPPER(TRIM(compte_tiers)) NOT IN (SELECT UPPER(TRIM(nom)) FROM tiers WHERE nom IS NOT NULL AND TRIM(nom) != '')
         ${exFilter}
-      GROUP BY compte_tiers
+      GROUP BY UPPER(TRIM(compte_tiers))
 
       ORDER BY type ASC, nom ASC
     `, [...params, ...params]);
-    res.json(rows);
+
+    // Calculer les métriques financières exactes adaptées à la nature Client vs Fournisseur
+    const enriched = (rawRows || []).map(r => {
+      // Distinction stricte : 40x = Fournisseur, 41x = Client
+      let type = r.type;
+      const cStr = String(r.compte_comptable || '').trim();
+      if (cStr.startsWith('40')) {
+        type = 'Fournisseur';
+      } else if (cStr.startsWith('41')) {
+        type = 'Client';
+      } else if (!type) {
+        type = (Number(r.total_credit) > Number(r.total_debit)) ? 'Fournisseur' : 'Client';
+      }
+      const isClient = type === 'Client';
+      const debit = Number(r.total_debit) || 0;
+      const credit = Number(r.total_credit) || 0;
+      const soldeBrut = debit - credit;
+
+      // Pour un Client : Débit = Facturé, Crédit = Encaissé/Réglé, Solde dû = Débit - Crédit
+      // Pour un Fournisseur : Crédit = Facturé/Acheté, Débit = Décaissé/Payé, Solde dû = Crédit - Débit
+      const totalFacture = isClient ? debit : credit;
+      const totalRegle = isClient ? credit : debit;
+      const soldeDu = isClient ? soldeBrut : (credit - debit);
+
+      let position = 'Soldé';
+      if (Math.abs(soldeDu) < 0.01) {
+        position = 'Soldé';
+      } else if (soldeDu > 0) {
+        position = isClient ? 'Créance à recouvrer' : 'Dette à payer';
+      } else {
+        position = isClient ? 'Trop-perçu (Avoir)' : 'Avance versée (Avoir)';
+      }
+
+      let tauxReglement = 0;
+      if (totalFacture > 0) {
+        tauxReglement = Math.min(100, Math.max(0, Math.round((totalRegle / totalFacture) * 100)));
+      } else if (Math.abs(soldeDu) < 0.01) {
+        tauxReglement = 100;
+      }
+
+      const effectiveCompte = (r.compte_comptable && String(r.compte_comptable).startsWith('4') && !String(r.compte_comptable).startsWith('44'))
+        ? r.compte_comptable
+        : (isClient ? '411100' : '401100');
+
+      return {
+        ...r,
+        type,
+        compte_comptable: effectiveCompte,
+        total_debit: debit,
+        total_credit: credit,
+        total_facture: totalFacture,
+        total_regle: totalRegle,
+        solde: soldeDu, // Solde net signifiant pour le DAF
+        solde_brut: soldeBrut,
+        position,
+        taux_reglement: tauxReglement,
+        nb_ecritures: Number(r.nb_ecritures) || 0,
+        nb_non_lettres: Number(r.nb_non_lettres) || 0,
+        montant_non_lettre: Number(r.montant_non_lettre) || 0
+      };
+    });
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Relevé d'un tiers (son "état") : même principe que le Grand Livre par compte
-// (GET /api/grand-livre/:compte), mais le rattachement se fait par nom (compte_tiers) plutôt que
-// par numéro de compte, puisqu'un tiers n'a pas de compte de mouvement propre dans le journal.
+// Relevé d'un tiers : situation financière détaillée et historique complet
+// Exclut rigoureusement les comptes de contrepartie (charges 6xx, produits 7xx, trésorerie 5xx)
+// pour ne conserver que les mouvements réels des comptes de tiers (classe 4)
 app.get('/api/tiers/:nom/releve', async (req, res) => {
   try {
     const { nom } = req.params;
@@ -1505,27 +1679,348 @@ app.get('/api/tiers/:nom/releve', async (req, res) => {
     const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
     const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
 
+    // Déterminer le compte et le type du tiers
+    const tierInfo = await db.runSelect("SELECT type, compte_comptable FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?)) LIMIT 1", [nom]);
+    let type = (tierInfo && tierInfo[0] && tierInfo[0].type) || '';
+    let compteComptable = (tierInfo && tierInfo[0] && tierInfo[0].compte_comptable) || '';
+
+    // Si le compte du tiers n'est pas un compte de tiers (classe 4 hors 44), on ne le garde pas
+    if (compteComptable && (!compteComptable.startsWith('4') || compteComptable.startsWith('44'))) {
+      compteComptable = '';
+    }
+
     const [openingRows, rows] = await Promise.all([
       ex
-        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND date < ?`, [nom, ex.date_debut])
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND (compte LIKE '4%') AND (compte NOT LIKE '44%') AND date < ?`, [nom, ex.date_debut])
         : Promise.resolve([{ debit: 0, credit: 0 }]),
       db.runSelect(`
-        SELECT id, date, code_journal, compte, n_facture, reference, libelle, debit, credit
+        SELECT id, date, code_journal, compte, n_facture, reference, libelle, debit, credit, statut_lettrage, code_lettrage, date_echeance, mode_paiement
         FROM journal
-        WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) ${exFilter}
+        WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND (compte LIKE '4%') AND (compte NOT LIKE '44%') ${exFilter}
         ORDER BY date ASC, created_at ASC, id ASC
       `, [nom, ...exParams]),
     ]);
 
+    if (!type && rows.length > 0) {
+      const firstCompte = rows.find(r => r.compte && r.compte.startsWith('4') && !r.compte.startsWith('44'))?.compte || '';
+      type = firstCompte.startsWith('41') ? 'Client' : (firstCompte.startsWith('40') ? 'Fournisseur' : 'Autre');
+      if (!compteComptable) compteComptable = firstCompte;
+    }
+    if (!compteComptable) {
+      compteComptable = (type === 'Fournisseur' ? '401100' : '411100');
+    }
+
     const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
     let solde = soldeOuverture;
+    let totalDebit = 0;
+    let totalCredit = 0;
+    let nbNonLettres = 0;
+
     const lignes = rows.map(r => {
-      solde += (r.debit || 0) - (r.credit || 0);
-      return { ...r, solde_progressif: solde };
+      const d = Number(r.debit) || 0;
+      const c = Number(r.credit) || 0;
+      totalDebit += d;
+      totalCredit += c;
+      if (r.statut_lettrage !== 'lettre') nbNonLettres++;
+      solde += (d - c);
+      return { ...r, debit: d, credit: c, solde_progressif: solde };
     });
 
-    res.json({ nom, solde_ouverture: soldeOuverture, lignes, solde_final: solde });
+    const isClient = type === 'Client';
+    const totalFacture = isClient ? totalDebit : totalCredit;
+    const totalRegle = isClient ? totalCredit : totalDebit;
+    const soldeDu = isClient ? solde : -solde;
+
+    res.json({
+      nom,
+      type: type || 'Client',
+      compte_comptable: compteComptable,
+      solde_ouverture: soldeOuverture,
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+      total_facture: totalFacture,
+      total_regle: totalRegle,
+      solde_final: solde,
+      solde_du: soldeDu,
+      taux_reglement: totalFacture > 0 ? Math.min(100, Math.round((totalRegle / totalFacture) * 100)) : (soldeDu === 0 ? 100 : 0),
+      nb_non_lettres: nbNonLettres,
+      lignes
+    });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Suppression d'une ligne d'écriture d'un tiers dans le relevé.
+// Supprime uniquement la contrepartie au sein du MÊME journal (ex: la charge 6xx / TVA 445x pour une facture d'achat),
+// SANS JAMAIS supprimer le règlement qui lui est attaché (journal de trésorerie CA/BQ ou compte 5xx).
+// Idéal pour éliminer une comptabilisation de facture en double sans détruire le paiement réel.
+app.delete('/api/tiers/ligne/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const targetRows = await db.runSelect('SELECT * FROM journal WHERE id = ?', [id]);
+    if (targetRows.length === 0) return res.status(404).json({ error: 'Écriture introuvable.' });
+    const target = targetRows[0];
+
+    // Contrôle d'exercice comptable actif
+    if ((await isOutsideActiveExercice(target.date)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({
+        error: "Cette écriture appartient à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur pour la supprimer.",
+        code: 'ADMIN_LOCKED'
+      });
+    }
+
+    // Recherche de la contrepartie STRICTEMENT AU SEIN DU MÊME CODE JOURNAL
+    // Ne jamais toucher aux règlements rattachés (journaux de trésorerie BQ/CA ou comptes 5xx)
+    let counterparts = [];
+    if (target.piece_id) {
+      counterparts = await db.runSelect(
+        'SELECT id, compte, debit, credit FROM journal WHERE piece_id = ? AND code_journal = ? AND id != ?',
+        [target.piece_id, target.code_journal, target.id]
+      );
+    }
+
+    if (counterparts.length === 0 && target.n_facture && String(target.n_facture).trim()) {
+      counterparts = await db.runSelect(
+        'SELECT id, compte, debit, credit FROM journal WHERE n_facture = ? AND code_journal = ? AND date = ? AND id != ?',
+        [target.n_facture, target.code_journal, target.date, target.id]
+      );
+    }
+
+    if (counterparts.length === 0) {
+      const isDebit = Number(target.debit) > 0;
+      const targetAmount = isDebit ? Number(target.debit) : Number(target.credit);
+      const sql = isDebit
+        ? 'SELECT id, compte, debit, credit FROM journal WHERE code_journal = ? AND date = ? AND credit = ? AND id != ? ORDER BY (CASE WHEN libelle = ? THEN 0 ELSE 1 END), rowid ASC LIMIT 1'
+        : 'SELECT id, compte, debit, credit FROM journal WHERE code_journal = ? AND date = ? AND debit = ? AND id != ? ORDER BY (CASE WHEN libelle = ? THEN 0 ELSE 1 END), rowid ASC LIMIT 1';
+      counterparts = await db.runSelect(sql, [target.code_journal, target.date, targetAmount, target.id, target.libelle]);
+    }
+
+    // Filtrage de sécurité : si la ligne supprimée est une facture (journal d'achats/ventes),
+    // ne jamais supprimer une ligne de trésorerie (5xx)
+    const isTargetTreso = String(target.compte || '').startsWith('5');
+    if (!isTargetTreso) {
+      counterparts = counterparts.filter(c => !String(c.compte || '').startsWith('5'));
+    }
+
+    const allIds = [target.id, ...counterparts.map(c => c.id)];
+    const placeholders = allIds.map(() => '?').join(',');
+
+    await db.runUpdate(`DELETE FROM journal WHERE id IN (${placeholders})`, allIds);
+    for (const did of allIds) {
+      try {
+        await db.runUpdate("INSERT INTO deleted_records (table_name, record_id) VALUES ('journal', ?)", [String(did)]);
+      } catch (e) {}
+    }
+
+    res.json({
+      success: true,
+      deletedCount: allIds.length,
+      counterpartsDeleted: counterparts.length,
+      deletedIds: allIds
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Suppression multiple de lignes d'écritures d'un tiers dans le relevé.
+// Supprime les lignes sélectionnées et leurs contreparties strictes dans le même journal,
+// tout en préservant systématiquement les lignes de trésorerie (comptes 5xx).
+app.post('/api/tiers/lignes/bulk-delete', async (req, res) => {
+  try {
+    const rawIds = (req.body && req.body.ids) || [];
+    const ids = Array.isArray(rawIds) ? rawIds.map(x => String(x).trim()).filter(Boolean) : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Aucun identifiant de ligne fourni.' });
+    }
+
+    const isAdmin = hasValidAdminToken(req);
+    const toDeleteSet = new Set();
+    let counterpartsCount = 0;
+
+    for (const id of ids) {
+      const targetRows = await db.runSelect('SELECT * FROM journal WHERE id = ?', [id]);
+      if (targetRows.length === 0) continue;
+      const target = targetRows[0];
+
+      // Contrôle exercice comptable actif
+      if ((await isOutsideActiveExercice(target.date)) && !isAdmin) {
+        return res.status(403).json({
+          error: `L'écriture du ${target.date} (${target.libelle || id}) appartient à un autre exercice. Déverrouillez la Zone Administrateur pour la supprimer.`,
+          code: 'ADMIN_LOCKED'
+        });
+      }
+
+      toDeleteSet.add(target.id);
+
+      // Recherche de la contrepartie STRICTEMENT AU SEIN DU MÊME CODE JOURNAL
+      let counterparts = [];
+      if (target.piece_id) {
+        counterparts = await db.runSelect(
+          'SELECT id, compte FROM journal WHERE piece_id = ? AND code_journal = ? AND id != ?',
+          [target.piece_id, target.code_journal, target.id]
+        );
+      }
+      if (counterparts.length === 0 && target.n_facture && String(target.n_facture).trim()) {
+        counterparts = await db.runSelect(
+          'SELECT id, compte FROM journal WHERE n_facture = ? AND code_journal = ? AND date = ? AND id != ?',
+          [target.n_facture, target.code_journal, target.date, target.id]
+        );
+      }
+      if (counterparts.length === 0) {
+        const isDebit = Number(target.debit) > 0;
+        const targetAmount = isDebit ? Number(target.debit) : Number(target.credit);
+        const sql = isDebit
+          ? 'SELECT id, compte FROM journal WHERE code_journal = ? AND date = ? AND credit = ? AND id != ? ORDER BY (CASE WHEN libelle = ? THEN 0 ELSE 1 END), rowid ASC LIMIT 1'
+          : 'SELECT id, compte FROM journal WHERE code_journal = ? AND date = ? AND debit = ? AND id != ? ORDER BY (CASE WHEN libelle = ? THEN 0 ELSE 1 END), rowid ASC LIMIT 1';
+        counterparts = await db.runSelect(sql, [target.code_journal, target.date, targetAmount, target.id, target.libelle]);
+      }
+
+      // Filtrage de sécurité : ne jamais supprimer une ligne de trésorerie (5xx)
+      const isTargetTreso = String(target.compte || '').startsWith('5');
+      if (!isTargetTreso) {
+        counterparts = counterparts.filter(c => !String(c.compte || '').startsWith('5'));
+      }
+
+      for (const c of counterparts) {
+        if (!toDeleteSet.has(c.id)) {
+          toDeleteSet.add(c.id);
+          counterpartsCount++;
+        }
+      }
+    }
+
+    const allIds = Array.from(toDeleteSet);
+    if (allIds.length === 0) {
+      return res.json({ success: true, deletedCount: 0, requestedCount: ids.length, deletedIds: [] });
+    }
+
+    // Suppression par blocs de 500 pour respecter la limite de variables SQLite
+    const chunkSize = 500;
+    for (let i = 0; i < allIds.length; i += chunkSize) {
+      const chunk = allIds.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+      await db.runUpdate(`DELETE FROM journal WHERE id IN (${placeholders})`, chunk);
+      for (const did of chunk) {
+        try {
+          await db.runUpdate("INSERT INTO deleted_records (table_name, record_id) VALUES ('journal', ?)", [String(did)]);
+        } catch (e) {}
+      }
+    }
+
+    res.json({
+      success: true,
+      deletedCount: allIds.length,
+      requestedCount: ids.length,
+      counterpartsCount,
+      deletedIds: allIds
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Régler une facture directement depuis le relevé des tiers (achats fournisseurs)
+app.post('/api/tiers/reglement', async (req, res) => {
+  try {
+    const {
+      ligne_facture_id,
+      nom_tiers,
+      compte_tiers,
+      montant,
+      date_reglement,
+      compte_tresorerie,
+      code_journal_reglement,
+      libelle,
+      reference,
+      mode_paiement
+    } = req.body;
+
+    if (!nom_tiers || !montant || Number(montant) <= 0 || !date_reglement || !compte_tresorerie || !code_journal_reglement) {
+      return res.status(400).json({ error: 'Champs obligatoires manquants ou montant invalide.' });
+    }
+
+    if ((await isOutsideActiveExercice(date_reglement)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({
+        error: "La date du règlement appartient à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur.",
+        code: 'ADMIN_LOCKED'
+      });
+    }
+
+    let targetFacture = null;
+    if (ligne_facture_id) {
+      const fRows = await db.runSelect('SELECT * FROM journal WHERE id = ?', [ligne_facture_id]);
+      if (fRows.length > 0) targetFacture = fRows[0];
+    }
+
+    const effectiveTiersCompte = compte_tiers || (targetFacture && targetFacture.compte) || '401100';
+    const effectiveNFacture = (targetFacture && targetFacture.n_facture) || '';
+    const cleanRef = reference || (effectiveNFacture ? `REG-${effectiveNFacture}` : 'REGLEMENT');
+    const cleanLibelle = libelle || `Règlement Facture ${effectiveNFacture || ''} - ${nom_tiers}`.trim();
+    const pieceIdReglement = crypto.randomUUID();
+    const codeLettrage = 'LET-' + Date.now().toString(36).toUpperCase().slice(-5);
+    const amount = Number(montant);
+
+    const stmt = db.prepare(`
+      INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, statut_lettrage, code_lettrage, mode_paiement)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // 1. Débit Fournisseur (401...)
+    stmt.run(
+      code_journal_reglement,
+      'ACHATS',
+      date_reglement,
+      effectiveTiersCompte,
+      nom_tiers,
+      cleanLibelle,
+      effectiveNFacture,
+      cleanRef,
+      amount,
+      0,
+      pieceIdReglement,
+      'lettre',
+      codeLettrage,
+      mode_paiement || 'Caisse'
+    );
+
+    // 2. Crédit Trésorerie (571... / 521...)
+    // compte_tiers est vide pour ne pas polluer les tiers avec la ligne trésorerie
+    stmt.run(
+      code_journal_reglement,
+      'ACHATS',
+      date_reglement,
+      compte_tresorerie,
+      '',
+      cleanLibelle,
+      effectiveNFacture,
+      cleanRef,
+      0,
+      amount,
+      pieceIdReglement,
+      'lettre',
+      codeLettrage,
+      mode_paiement || 'Caisse'
+    );
+
+    stmt.finalize();
+
+    if (ligne_facture_id) {
+      await db.runUpdate(
+        `UPDATE journal SET statut_lettrage = 'lettre', code_lettrage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [codeLettrage, ligne_facture_id]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Règlement de ${amount.toLocaleString()} FCFA enregistré avec succès dans le journal ${code_journal_reglement}.`,
+      piece_id: pieceIdReglement,
+      code_lettrage: codeLettrage
+    });
+  } catch (err) {
+    console.error('Erreur tiers reglement:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1616,22 +2111,40 @@ app.post('/api/tiers/merge', async (req, res) => {
     if (!keepNom || !mergeNom || !keepNom.trim() || !mergeNom.trim()) {
       return res.status(400).json({ error: 'Les deux noms de tiers sont obligatoires.' });
     }
-    if (keepNom.trim().toUpperCase() === mergeNom.trim().toUpperCase()) {
-      return res.status(400).json({ error: 'Les deux tiers sélectionnés sont déjà identiques.' });
+    const targetNom = keepNom.trim();
+    const sourceNom = mergeNom.trim();
+
+    if (targetNom.toUpperCase() === sourceNom.toUpperCase()) {
+      // Cas d'harmonisation de graphies / espaces / casse identiques
+      const result = await db.runUpdate(
+        `UPDATE journal SET compte_tiers = ?, updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE UPPER(TRIM(compte_tiers)) = UPPER(?)`,
+        [targetNom, targetNom]
+      );
+      const tiersRows = await db.runSelect(`SELECT id, type, compte_comptable FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(?) ORDER BY created_at ASC`, [targetNom]);
+      if (tiersRows.length > 1) {
+        const keepId = tiersRows[0].id;
+        await db.runUpdate(`DELETE FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(?) AND id != ?`, [targetNom, keepId]);
+      } else if (tiersRows.length === 0) {
+        await db.runUpdate(
+          `INSERT INTO tiers (nom, compte_comptable, type) VALUES (?, ?, ?)`,
+          [targetNom, req.body.compte_comptable || null, req.body.type || 'Client']
+        );
+      }
+      return res.json({ success: true, changes: result.changes, message: `Harmonisation réussie pour "${targetNom}".` });
     }
 
     const result = await db.runUpdate(
       `UPDATE journal SET compte_tiers = ?, updated_at = CURRENT_TIMESTAMP, synced_at = NULL WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?))`,
-      [keepNom.trim(), mergeNom]
+      [targetNom, sourceNom]
     );
 
-    await db.runUpdate(`DELETE FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [mergeNom]);
+    await db.runUpdate(`DELETE FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [sourceNom]);
 
-    const existingKeep = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [keepNom]);
+    const existingKeep = await db.runSelect(`SELECT id FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?))`, [targetNom]);
     if (existingKeep.length === 0) {
       await db.runUpdate(
         `INSERT INTO tiers (nom, compte_comptable, type) VALUES (?, ?, ?)`,
-        [keepNom.trim(), req.body.compte_comptable || null, req.body.type || 'Client']
+        [targetNom, req.body.compte_comptable || null, req.body.type || 'Client']
       );
     }
 
@@ -1814,6 +2327,83 @@ app.put('/api/journal/:id', async (req, res) => {
   }
 });
 
+// Modification de toutes les colonnes en masse ou à l'unité depuis le Grand Livre
+app.patch('/api/journal/bulk-update', async (req, res) => {
+  try {
+    const { ids, updates } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'Aucune écriture sélectionnée.' });
+    }
+    if (!updates || typeof updates !== 'object') {
+      return res.status(400).json({ error: 'Données de mise à jour obligatoires.' });
+    }
+
+    const placeholders = ids.map(() => '?').join(',');
+    const targetRows = await db.runSelect(`SELECT date FROM journal WHERE id IN (${placeholders})`, ids);
+    const activeEx = await getActiveExercice();
+    const crossExercice = !!activeEx && (
+      targetRows.some(r => r.date < activeEx.date_debut || r.date > activeEx.date_fin) ||
+      (updates.date && (updates.date < activeEx.date_debut || updates.date > activeEx.date_fin))
+    );
+    if (crossExercice && !hasValidAdminToken(req)) {
+      return res.status(403).json({
+        error: "Une ou plusieurs écritures sélectionnées appartiennent à un autre exercice que l'exercice actif. Déverrouillez la Zone Administrateur pour les modifier.",
+        code: 'ADMIN_LOCKED'
+      });
+    }
+
+    const allowedFields = [
+      'date',
+      'code_journal',
+      'compte',
+      'compte_tiers',
+      'libelle',
+      'n_facture',
+      'reference',
+      'debit',
+      'credit',
+      'poste_budgetaire'
+    ];
+
+    const setClauses = [];
+    const params = [];
+
+    for (const field of allowedFields) {
+      if (updates[field] !== undefined && updates[field] !== null) {
+        setClauses.push(`${field} = ?`);
+        if (field === 'debit' || field === 'credit') {
+          params.push(parseFloat(updates[field]) || 0);
+        } else {
+          params.push(String(updates[field]).trim());
+        }
+      }
+    }
+
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'Aucune colonne à modifier spécifiée.' });
+    }
+
+    setClauses.push("updated_at = CURRENT_TIMESTAMP", "synced_at = NULL");
+
+    const sql = `UPDATE journal SET ${setClauses.join(', ')} WHERE id IN (${placeholders})`;
+    const result = await db.runUpdate(sql, [...params, ...ids]);
+
+    try {
+      const updatedRows = await db.runSelect(
+        `SELECT libelle, compte, code_journal, compte_tiers FROM journal WHERE id IN (${placeholders})`,
+        ids
+      );
+      await learnFromJournalData(updatedRows);
+    } catch (e) {
+      console.error('Erreur apprentissage ML après modification multiple:', e);
+    }
+
+    res.json({ success: true, changes: result.changes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Changement de compte en masse depuis le Grand Livre : permet de corriger plusieurs écritures
 // mal imputées d'un coup (sélection multiple), sans avoir à rouvrir chacune dans le Journal.
 // Même logique que PUT /api/journal/:id ci-dessus, mais sur un lot d'ids.
@@ -1878,12 +2468,9 @@ app.delete('/api/journal/:id', async (req, res) => {
 });
 
 // --- GRAND LIVRE ---
-// Liste des comptes ayant des écritures (exercice actif), pour le sélecteur du Grand Livre.
+// 1. Liste des comptes ayant des écritures (exercice actif), pour le sélecteur du Grand Livre.
 app.get('/api/grand-livre/comptes', async (req, res) => {
   try {
-    // Passe par getBalanceRows() (solde antérieur + mouvement) plutôt que par un simple filtre de
-    // période : un compte resté sans écriture pendant l'exercice actif, mais dont le solde reporté
-    // est non nul, doit rester sélectionnable pour consulter son Grand Livre.
     const rows = await getBalanceRows();
     res.json(rows.map(r => ({ compte: r.compte, solde: r.solde_cumule })));
   } catch (err) {
@@ -1891,14 +2478,110 @@ app.get('/api/grand-livre/comptes', async (req, res) => {
   }
 });
 
-// Écritures d'un compte, triées chronologiquement, avec solde progressif cumulé (solde
-// d'ouverture reporté des exercices antérieurs + SUM des lignes précédentes du même compte dans
-// la période) — c'est la définition même d'un Grand Livre. Sans ce report, le solde progressif
-// repartait de zéro à chaque changement d'exercice, ce qui ne reflète pas le solde réel du compte.
-// Le Grand Livre par compte et le Grand Livre par journal (ci-dessous) sont deux axes de
-// consultation totalement indépendants et mutuellement exclusifs (voir ComptabiliteModule.jsx,
-// glFilterMode) : sélectionner un compte affiche TOUJOURS l'intégralité de ses écritures, tous
-// journaux confondus, quel que soit le journal sélectionné par ailleurs à l'écran.
+// 2. Grand Livre Auxiliaire (Liste des tiers mouvementés sur la classe 4)
+app.get('/api/grand-livre/tiers', async (req, res) => {
+  try {
+    const { clause, params } = await getExerciceDateFilter();
+    const exFilter = clause ? `AND ${clause}` : '';
+    const rows = await db.runSelect(`
+      SELECT DISTINCT UPPER(TRIM(compte_tiers)) as nom,
+        MAX(CASE WHEN substr(compte, 1, 2) = '41' THEN 'Client' ELSE 'Fournisseur' END) as type,
+        MAX(compte) as compte_comptable
+      FROM journal
+      WHERE compte_tiers IS NOT NULL AND TRIM(compte_tiers) != '' AND (compte LIKE '4%') AND (compte NOT LIKE '44%') ${exFilter}
+      GROUP BY UPPER(TRIM(compte_tiers))
+      ORDER BY type ASC, nom ASC
+    `, params);
+    res.json(rows.map(r => ({ nom: r.nom, type: r.type, compte_comptable: r.compte_comptable })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Vue "par journal" : toutes les écritures d'un code journal donné
+app.get('/api/grand-livre/par-journal/:codeJournal', async (req, res) => {
+  try {
+    const { codeJournal } = req.params;
+    const ex = await getActiveExercice();
+    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
+    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
+
+    const lignes = await db.runSelect(`
+      SELECT id, date, code_journal, compte, compte_tiers, n_facture, reference, libelle, debit, credit
+      FROM journal
+      WHERE code_journal = ? ${exFilter}
+      ORDER BY date ASC, id ASC
+    `, [codeJournal, ...exParams]);
+
+    const totalDebit = lignes.reduce((s, l) => s + (l.debit || 0), 0);
+    const totalCredit = lignes.reduce((s, l) => s + (l.credit || 0), 0);
+
+    res.json({ code_journal: codeJournal, lignes, total_debit: totalDebit, total_credit: totalCredit });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Grand Livre Auxiliaire d'un Tiers (Écritures de classe 4 hors TVA avec solde progressif et solde d'ouverture)
+app.get('/api/grand-livre/par-tiers/:nom', async (req, res) => {
+  try {
+    const { nom } = req.params;
+    const ex = await getActiveExercice();
+    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
+    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
+
+    const tierInfo = await db.runSelect("SELECT type, compte_comptable FROM tiers WHERE UPPER(TRIM(nom)) = UPPER(TRIM(?)) LIMIT 1", [nom]);
+    let type = (tierInfo && tierInfo[0] && tierInfo[0].type) || '';
+    let compteComptable = (tierInfo && tierInfo[0] && tierInfo[0].compte_comptable) || '';
+
+    const [openingRows, rows] = await Promise.all([
+      ex
+        ? db.runSelect(`SELECT SUM(debit) as debit, SUM(credit) as credit FROM journal WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND (compte LIKE '4%') AND (compte NOT LIKE '44%') AND date < ?`, [nom, ex.date_debut])
+        : Promise.resolve([{ debit: 0, credit: 0 }]),
+      db.runSelect(`
+        SELECT id, date, code_journal, compte, n_facture, reference, libelle, compte_tiers, debit, credit, statut_lettrage, code_lettrage
+        FROM journal
+        WHERE UPPER(TRIM(compte_tiers)) = UPPER(TRIM(?)) AND (compte LIKE '4%') AND (compte NOT LIKE '44%') ${exFilter}
+        ORDER BY date ASC, id ASC
+      `, [nom, ...exParams]),
+    ]);
+
+    if (!type && rows.length > 0) {
+      const firstCompte = rows.find(r => r.compte)?.compte || '';
+      type = firstCompte.startsWith('41') ? 'Client' : (firstCompte.startsWith('40') ? 'Fournisseur' : 'Autre');
+      if (!compteComptable) compteComptable = firstCompte;
+    }
+
+    const soldeOuverture = ((openingRows[0] && openingRows[0].debit) || 0) - ((openingRows[0] && openingRows[0].credit) || 0);
+    let solde = soldeOuverture;
+    let totalDebit = 0;
+    let totalCredit = 0;
+
+    const lignes = rows.map(r => {
+      const d = Number(r.debit) || 0;
+      const c = Number(r.credit) || 0;
+      totalDebit += d;
+      totalCredit += c;
+      solde += (d - c);
+      return { ...r, debit: d, credit: c, solde_progressif: solde };
+    });
+
+    res.json({
+      nom,
+      type: type || 'Client',
+      compte_comptable: compteComptable,
+      solde_ouverture: soldeOuverture,
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+      solde_final: solde,
+      lignes
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Grand Livre Général par Compte (Route paramétrée placée EN DERNIER)
 app.get('/api/grand-livre/:compte', async (req, res) => {
   try {
     const { compte } = req.params;
@@ -1915,7 +2598,7 @@ app.get('/api/grand-livre/:compte', async (req, res) => {
         SELECT id, date, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit
         FROM journal
         WHERE compte = ? ${exFilter}
-        ORDER BY date ASC, created_at ASC, id ASC
+        ORDER BY date ASC, id ASC
       `, [compte, ...exParams]),
     ]);
 
@@ -1928,33 +2611,6 @@ app.get('/api/grand-livre/:compte', async (req, res) => {
     });
 
     res.json({ compte, solde_ouverture: soldeOuverture, lignes, solde_final: solde });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Vue "par journal" : toutes les écritures d'un code journal donné, tous comptes confondus —
-// contrairement au Grand Livre par compte, il n'y a pas de solde progressif unique qui aurait un
-// sens ici (des comptes de nature différente s'y mélangent), donc on renvoie chaque ligne avec son
-// compte et seulement les totaux Débit/Crédit du journal sur la période.
-app.get('/api/grand-livre/par-journal/:codeJournal', async (req, res) => {
-  try {
-    const { codeJournal } = req.params;
-    const ex = await getActiveExercice();
-    const exFilter = ex ? 'AND date >= ? AND date <= ?' : '';
-    const exParams = ex ? [ex.date_debut, ex.date_fin] : [];
-
-    const lignes = await db.runSelect(`
-      SELECT id, date, code_journal, compte, compte_tiers, n_facture, reference, libelle, debit, credit
-      FROM journal
-      WHERE code_journal = ? ${exFilter}
-      ORDER BY date ASC, created_at ASC, id ASC
-    `, [codeJournal, ...exParams]);
-
-    const totalDebit = lignes.reduce((s, l) => s + (l.debit || 0), 0);
-    const totalCredit = lignes.reduce((s, l) => s + (l.credit || 0), 0);
-
-    res.json({ code_journal: codeJournal, lignes, total_debit: totalDebit, total_credit: totalCredit });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2035,8 +2691,26 @@ app.delete('/api/fiscalite/echeances/:id', (req, res) => {
 
 // An écriture is one or more lines sharing a piece_id; it must balance (sum debit === sum credit)
 // before it can be persisted, so the ledger never accepts a one-sided entry.
+// Supporte également le "Règlement en 1 Clic" lié (regle_immediat).
 app.post('/api/journal', async (req, res) => {
-  const { code_journal, poste_budgetaire, date, n_facture, reference, lines } = req.body;
+  const {
+    code_journal,
+    poste_budgetaire,
+    date,
+    n_facture,
+    reference,
+    lines,
+    // Option Règlement en 1 Clic lié (individuel ou multiple) :
+    regle_immediat = false,
+    date_reglement,
+    mode_reglement = 'caisse',
+    code_journal_reglement,
+    compte_tresorerie,
+    montant_regle,
+    reference_reglement,
+    compte_tiers_reglement,
+    reglements = []
+  } = req.body;
 
   // Le journal Caisse (CA) suppose un mouvement de caisse même si l'utilisateur n'a pas saisi
   // explicitement la ligne de contrepartie 571100 — une seule ligne suffit dans ce cas, la
@@ -2048,6 +2722,30 @@ app.post('/api/journal', async (req, res) => {
 
   if ((await isOutsideActiveExercice(date)) && !hasValidAdminToken(req)) {
     return res.status(403).json({ error: "Cette date tombe hors de l'exercice actif. Déverrouillez la Zone Administrateur pour saisir une écriture sur un autre exercice.", code: 'ADMIN_LOCKED' });
+  }
+
+  // Normalisation des règlements demandés
+  let settlementItems = [];
+  if (Array.isArray(reglements) && reglements.length > 0) {
+    settlementItems = reglements.filter(r => r && (r.active === true || r.active === undefined));
+  } else if (regle_immediat) {
+    settlementItems = [{
+      date_reglement: date_reglement || date,
+      mode_reglement,
+      code_journal_reglement,
+      compte_tresorerie,
+      montant_regle,
+      reference_reglement,
+      compte_tiers: compte_tiers_reglement
+    }];
+  }
+
+  // Vérification des dates de règlements
+  for (const s of settlementItems) {
+    const sDate = (s.date_reglement || date).trim();
+    if ((await isOutsideActiveExercice(sDate)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: `La date du règlement (${sDate}) tombe hors de l'exercice actif.`, code: 'ADMIN_LOCKED' });
+    }
   }
 
   for (const l of lines) {
@@ -2067,9 +2765,54 @@ app.post('/api/journal', async (req, res) => {
   // mouvement de caisse manquant plutôt que de rejeter l'écriture.
   if (code_journal === 'CA' && Math.abs(gap) > 0.01 && !allLines.some(l => String(l.compte).startsWith('57'))) {
     allLines.push({
+      date: allLines[allLines.length - 1]?.date || date,
       compte: '571100',
       compte_tiers: '',
       libelle: 'Mouvement de caisse (contrepartie automatique)',
+      debit: gap < 0 ? Math.abs(gap) : 0,
+      credit: gap > 0 ? gap : 0
+    });
+    totalDebit = allLines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0);
+    totalCredit = allLines.reduce((s, l) => s + (parseFloat(l.credit) || 0), 0);
+  }
+
+  // Mouvement automatique de banque relatif au code journal sélectionné :
+  // Le code journal bancaire (ex: BQ, BQC015, BQC012, BQC004, BQ2, BQACP, BQC019...) suppose que le compte bancaire
+  // correspondant soit mouvementé en fonction des opérations saisies (charges au Débit => Banque au Crédit ;
+  // produits au Crédit => Banque au Débit), issues des relevés bancaires de chaque banque.
+  const isBankJournal = /^BQ/i.test(code_journal);
+  if (isBankJournal && Math.abs(gap) > 0.01 && !allLines.some(l => /^(52|51)/.test(String(l.compte)))) {
+    // 1. Chercher le compte bancaire le plus fréquent pour ce code journal
+    const hist = await db.runSelect(
+      "SELECT compte, COUNT(*) as cnt FROM journal WHERE code_journal = ? AND (compte LIKE '52%' OR compte LIKE '51%') GROUP BY compte ORDER BY cnt DESC LIMIT 1",
+      [code_journal]
+    );
+    let targetBqCompte = hist && hist[0] ? String(hist[0].compte).trim() : null;
+
+    // 2. Si non trouvé, chercher par suffixe numérique dans chart_of_accounts ou balance (ex: BQC015 -> 52110015, BQC004 -> 52110004)
+    if (!targetBqCompte) {
+      const digits = code_journal.replace(/\D/g, '');
+      if (digits) {
+        const row = await db.runSelect("SELECT compte FROM chart_of_accounts WHERE (compte LIKE '52%' OR compte LIKE '51%') AND (compte LIKE ? OR compte LIKE ?) LIMIT 1", [`%${digits}`, `%${digits}%`]);
+        if (row && row[0]) targetBqCompte = String(row[0].compte).trim();
+      }
+    }
+
+    // 3. Fallback compte banque
+    if (!targetBqCompte) {
+      const row = await db.runSelect("SELECT compte FROM chart_of_accounts WHERE compte LIKE '52%' ORDER BY compte ASC LIMIT 1");
+      targetBqCompte = row && row[0] ? String(row[0].compte).trim() : '521100';
+    }
+
+    // Libellé officiel du compte bancaire
+    const chartRow = await db.runSelect("SELECT libelle FROM chart_of_accounts WHERE compte = ?", [targetBqCompte]);
+    const bqNom = chartRow && chartRow[0] ? String(chartRow[0].libelle).replace(/["'\s*]+/g, ' ').trim() : 'Banque';
+
+    allLines.push({
+      date: allLines[allLines.length - 1]?.date || date,
+      compte: targetBqCompte,
+      compte_tiers: '',
+      libelle: `Mouvement bancaire ${bqNom} (contrepartie automatique)`,
       debit: gap < 0 ? Math.abs(gap) : 0,
       credit: gap > 0 ? gap : 0
     });
@@ -2081,21 +2824,157 @@ app.post('/api/journal', async (req, res) => {
     return res.status(400).json({ error: `Écriture déséquilibrée : Débit ${totalDebit.toLocaleString()} ≠ Crédit ${totalCredit.toLocaleString()} (écart de ${Math.abs(totalDebit - totalCredit).toLocaleString()}).` });
   }
 
-  // UUID plutôt que MAX(piece_id)+1 : un compteur local resterait sujet aux mêmes collisions
-  // entre machines que les id eux-mêmes lors du sync Supabase.
+  // UUID de l'écriture principale
   const piece_id = crypto.randomUUID();
+
+  // Préparation des Règlements en 1 Clic (si activés)
+  let paymentLines = [];
+  let createdSettlements = [];
+
+  for (const s of settlementItems) {
+    const sMode = String(s.mode_reglement || 'caisse').toLowerCase();
+    const isBanque = sMode === 'banque';
+    const isMoMo = sMode === 'mobile_money';
+    const defaultJournalReglement = isBanque ? 'BQ' : (isMoMo ? 'OD' : 'CA');
+    const journalReglement = (s.code_journal_reglement || '').trim() || defaultJournalReglement;
+
+    const defaultCompteTreso = isBanque ? '52110017' : (isMoMo ? '55410001' : '57111001');
+    const effectiveCompteTreso = (s.compte_tresorerie || '').trim() || defaultCompteTreso;
+
+    const sDate = (s.date_reglement || date).trim();
+
+    // Détection de la ligne tiers ciblée dans la grille
+    let targetLine = null;
+    if (s.line_index !== undefined && s.line_index !== null && allLines[s.line_index]) {
+      const cand = allLines[s.line_index];
+      if (!s.compte_tiers || String(cand.compte) === String(s.compte_tiers)) {
+        targetLine = cand;
+      }
+    }
+    if (!targetLine && s.compte_tiers) {
+      targetLine = allLines.find(l => String(l.compte) === String(s.compte_tiers) && l.statut_lettrage !== 'lettre')
+        || allLines.find(l => String(l.compte) === String(s.compte_tiers));
+    }
+    if (!targetLine) {
+      targetLine = allLines.find(l => /^4/.test(String(l.compte)) && l.statut_lettrage !== 'lettre')
+        || allLines.find(l => /^4/.test(String(l.compte)));
+    }
+
+    let targetTiersCompte = (s.compte_tiers || '').trim();
+    let targetTiersNom = (s.nom_tiers || '').trim();
+    if (targetLine) {
+      if (!targetTiersCompte) targetTiersCompte = String(targetLine.compte);
+      if (!targetTiersNom) targetTiersNom = String(targetLine.compte_tiers || targetLine.libelle || '');
+    }
+    if (!targetTiersCompte) {
+      targetTiersCompte = code_journal === 'VE' ? '411100' : '401100';
+    }
+
+    const baseMontant = targetLine
+      ? (parseFloat(targetLine.debit) || parseFloat(targetLine.credit) || totalDebit)
+      : totalDebit;
+    const regle = Math.round((parseFloat(s.montant_regle) || baseMontant) * 100) / 100;
+    if (regle <= 0) continue;
+
+    const codeLettrage = 'L' + Math.random().toString(36).substring(2, 7).toUpperCase();
+    const pieceIdReglement = crypto.randomUUID();
+
+    // Si le compte tiers était au Crédit (dette fournisseur, salariale, sociale), on le Débite et Crédite la trésorerie.
+    // S'il était au Débit (créance client), on le Crédite et Débite la trésorerie.
+    const isCreditSide = targetLine ? (parseFloat(targetLine.credit) > 0) : (code_journal !== 'VE');
+    const pRef = (s.reference_reglement || '').trim() || (n_facture ? `REG-${n_facture}` : `REG-${targetTiersCompte}`);
+    const pLibelle = `Règlement ${pRef} ${targetTiersNom ? '- ' + targetTiersNom : ''}`.trim();
+
+    if (isCreditSide) {
+      // Paiement de dette (Achat / Fournisseur / Charge sociale / Salaires)
+      paymentLines.push({
+        code_journal: journalReglement,
+        date: sDate,
+        compte: targetTiersCompte,
+        compte_tiers: targetTiersNom,
+        libelle: pLibelle,
+        n_facture: String(n_facture || ''),
+        reference: pRef,
+        debit: regle,
+        credit: 0,
+        statut_lettrage: 'lettre',
+        code_lettrage: codeLettrage,
+        date_lettrage: sDate,
+        piece_id: pieceIdReglement
+      });
+      paymentLines.push({
+        code_journal: journalReglement,
+        date: sDate,
+        compte: effectiveCompteTreso,
+        compte_tiers: '',
+        libelle: pLibelle,
+        n_facture: String(n_facture || ''),
+        reference: pRef,
+        debit: 0,
+        credit: regle,
+        piece_id: pieceIdReglement
+      });
+    } else {
+      // Encaissement de créance (Vente / Client / Remboursement)
+      paymentLines.push({
+        code_journal: journalReglement,
+        date: sDate,
+        compte: effectiveCompteTreso,
+        compte_tiers: '',
+        libelle: pLibelle,
+        n_facture: String(n_facture || ''),
+        reference: pRef,
+        debit: regle,
+        credit: 0,
+        piece_id: pieceIdReglement
+      });
+      paymentLines.push({
+        code_journal: journalReglement,
+        date: sDate,
+        compte: targetTiersCompte,
+        compte_tiers: targetTiersNom,
+        libelle: pLibelle,
+        n_facture: String(n_facture || ''),
+        reference: pRef,
+        debit: 0,
+        credit: regle,
+        statut_lettrage: 'lettre',
+        code_lettrage: codeLettrage,
+        date_lettrage: sDate,
+        piece_id: pieceIdReglement
+      });
+    }
+
+    // Appliquer le lettrage sur la ligne tiers correspondante dans l'écriture principale
+    if (targetLine) {
+      targetLine.statut_lettrage = 'lettre';
+      targetLine.code_lettrage = codeLettrage;
+      targetLine.date_lettrage = sDate;
+    }
+
+    createdSettlements.push({
+      piece_id_reglement: pieceIdReglement,
+      code_lettrage: codeLettrage,
+      compte_tiers: targetTiersCompte,
+      nom_tiers: targetTiersNom,
+      montant: regle,
+      journal: journalReglement
+    });
+  }
 
   db.serialize(() => {
     db.run("BEGIN TRANSACTION");
     const stmt = db.prepare(`
-      INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO journal (code_journal, poste_budgetaire, date, compte, compte_tiers, libelle, n_facture, reference, debit, credit, piece_id, statut_lettrage, code_lettrage, date_lettrage)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+
+    // 1. Insertion de la grille principale
     allLines.forEach(l => {
       stmt.run(
         code_journal,
         poste_budgetaire || '',
-        date,
+        l.date || date,
         String(l.compte),
         String(l.compte_tiers || ''),
         l.libelle,
@@ -2103,9 +2982,33 @@ app.post('/api/journal', async (req, res) => {
         String(reference || ''),
         parseFloat(l.debit) || 0,
         parseFloat(l.credit) || 0,
-        piece_id
+        piece_id,
+        l.statut_lettrage || 'non_lettre',
+        l.code_lettrage || null,
+        l.date_lettrage || null
       );
     });
+
+    // 2. Insertion des règlements liés en 1 Clic (si activés)
+    paymentLines.forEach(pl => {
+      stmt.run(
+        pl.code_journal,
+        poste_budgetaire || '',
+        pl.date,
+        String(pl.compte),
+        String(pl.compte_tiers || ''),
+        pl.libelle,
+        pl.n_facture,
+        pl.reference,
+        pl.debit,
+        pl.credit,
+        pl.piece_id,
+        pl.statut_lettrage || 'non_lettre',
+        pl.code_lettrage || null,
+        pl.date_lettrage || null
+      );
+    });
+
     stmt.finalize();
     db.run("COMMIT", (commitErr) => {
       if (commitErr) {
@@ -2113,9 +3016,497 @@ app.post('/api/journal', async (req, res) => {
         return res.status(500).json({ error: commitErr.message });
       }
       db.ensureExercicesFromJournal().catch(() => {});
-      res.json({ success: true, piece_id });
+      res.json({
+        success: true,
+        piece_id,
+        piece_id_reglement: createdSettlements[0]?.piece_id_reglement || null,
+        code_lettrage: createdSettlements[0]?.code_lettrage || null,
+        settlements: createdSettlements,
+        message: createdSettlements.length > 0
+          ? `Écriture et ${createdSettlements.length} règlement(s) en 1 clic enregistrés avec succès.`
+          : "Écriture enregistrée avec succès."
+      });
     });
   });
+});
+
+// Configuration des journaux et comptes fréquents pour l'écran de Saisie / Upload
+app.get('/api/journal/config-saisie', async (req, res) => {
+  try {
+    const dbJournals = await db.runSelect("SELECT DISTINCT code_journal FROM journal WHERE code_journal IS NOT NULL AND code_journal != ''");
+    const allCodes = (dbJournals || []).map(r => String(r.code_journal).trim()).filter(Boolean);
+
+    const achCodes = allCodes.filter(c => /^(AC|ACH)/i.test(c));
+    const vteCodes = allCodes.filter(c => /^(VE|VTE)/i.test(c));
+    const caisCodes = allCodes.filter(c => /^(CA|CAIS)/i.test(c));
+    const bqCodes = allCodes.filter(c => /^BQ/i.test(c));
+    const odCodes = allCodes.filter(c => /^OD/i.test(c));
+
+    const journaux_achats = achCodes.length ? achCodes : ['AC', 'ACH'];
+    const journaux_ventes = vteCodes.length ? vteCodes : ['VE', 'VTE'];
+    const journaux_caisse = caisCodes.length ? caisCodes : ['CA', 'CAISPR'];
+    const journaux_banque = bqCodes.length ? bqCodes : ['BQ'];
+    const journaux_od = odCodes.length ? odCodes : ['OD'];
+
+    function sanitizeLabel(raw) {
+      if (!raw) return '';
+      return String(raw)
+        .replace(/^["'\s*]+/, '')
+        .replace(/["'\s*-]+$/, '')
+        .replace(/["']+/g, '')
+        .trim();
+    }
+
+    // Extraction des comptes de trésorerie PRÉSENTS DANS LA BALANCE (Classe 5)
+    let balanceRows = [];
+    try {
+      balanceRows = await getBalanceRows();
+    } catch (e) {
+      console.warn("Erreur getBalanceRows pour config-saisie:", e);
+    }
+    const balanceTreso = (balanceRows || []).filter(r => String(r.compte || '').startsWith('5'));
+
+    // Intitulés officiels depuis chart_of_accounts
+    let chartRows = [];
+    try {
+      chartRows = await db.runSelect("SELECT compte, libelle FROM chart_of_accounts WHERE compte LIKE '5%'");
+    } catch (e) {}
+
+    const chartMap = new Map();
+    (chartRows || []).forEach(r => {
+      const cleanLib = sanitizeLabel(r.libelle);
+      if (cleanLib) chartMap.set(String(r.compte).trim(), cleanLib);
+    });
+
+    // 1. Les comptes présents dans la Balance (priorité absolue)
+    const balanceTresoMap = new Map();
+    balanceTreso.forEach(r => {
+      const c = String(r.compte).trim();
+      const cleanChart = chartMap.get(c);
+      const cleanJourn = sanitizeLabel(r.intitule);
+      balanceTresoMap.set(c, {
+        compte: c,
+        libelle: cleanChart || cleanJourn || 'Trésorerie',
+        solde: r.solde_cumule || 0,
+        is_in_balance: true
+      });
+    });
+
+    // 2. Si un compte de trésorerie figure dans chart_of_accounts mais sans mouvement, on le garde en complément
+    (chartRows || []).forEach(r => {
+      const c = String(r.compte).trim();
+      if (!balanceTresoMap.has(c)) {
+        const cleanChart = sanitizeLabel(r.libelle);
+        balanceTresoMap.set(c, {
+          compte: c,
+          libelle: cleanChart || 'Trésorerie',
+          solde: 0,
+          is_in_balance: false
+        });
+      }
+    });
+
+    const allTresoArray = Array.from(balanceTresoMap.values());
+
+    // Comptes Caisse de la Balance (57...)
+    const balanceCaisse = allTresoArray.filter(t => t.compte.startsWith('57') && t.is_in_balance);
+    const fallbackCaisse = allTresoArray.filter(t => t.compte.startsWith('57') && !t.is_in_balance);
+    const comptes_caisse = (balanceCaisse.length ? balanceCaisse : fallbackCaisse)
+      .sort((a, b) => Math.abs(b.solde || 0) - Math.abs(a.solde || 0) || a.compte.localeCompare(b.compte));
+
+    // Comptes Banque de la Balance (52... / 51... / 53... / 54... / 56...)
+    const balanceBanque = allTresoArray.filter(t => /^(52|51|53|54|56)/.test(t.compte) && t.is_in_balance);
+    const fallbackBanque = allTresoArray.filter(t => /^(52|51|53|54|56)/.test(t.compte) && !t.is_in_balance);
+    const comptes_banque = (balanceBanque.length ? balanceBanque : fallbackBanque)
+      .sort((a, b) => Math.abs(b.solde || 0) - Math.abs(a.solde || 0) || a.compte.localeCompare(b.compte));
+
+    // Comptes Mobile Money (55... / 5852...)
+    const comptes_mobile_money = allTresoArray
+      .filter(t => /^(55|5852)/.test(t.compte) || /money|orange|mtn/i.test(t.libelle))
+      .sort((a, b) => (b.is_in_balance ? 1 : 0) - (a.is_in_balance ? 1 : 0) || Math.abs(b.solde || 0) - Math.abs(a.solde || 0));
+
+    // Liste complète triée (ceux de la balance d'abord)
+    const all_tresorerie = allTresoArray
+      .sort((a, b) => (b.is_in_balance ? 1 : 0) - (a.is_in_balance ? 1 : 0) || Math.abs(b.solde || 0) - Math.abs(a.solde || 0));
+
+    const dbTiers = await db.runSelect("SELECT id, type, nom, compte_comptable FROM tiers ORDER BY nom ASC LIMIT 100");
+
+    const rawAchats = await db.runSelect("SELECT compte, libelle, COUNT(*) as cnt FROM journal WHERE compte LIKE '6%' GROUP BY compte ORDER BY cnt DESC LIMIT 30");
+    const rawVentes = await db.runSelect("SELECT compte, libelle, COUNT(*) as cnt FROM journal WHERE compte LIKE '7%' GROUP BY compte ORDER BY cnt DESC LIMIT 30");
+
+    // Cartographie des journaux bancaires vers leur compte de trésorerie dédié (Classe 52/51)
+    const journaux_banque_details = [];
+    for (const bqCode of journaux_banque) {
+      let targetCompte = null;
+      try {
+        const hist = await db.runSelect(
+          "SELECT compte, COUNT(*) as cnt FROM journal WHERE code_journal = ? AND (compte LIKE '52%' OR compte LIKE '51%') GROUP BY compte ORDER BY cnt DESC LIMIT 1",
+          [bqCode]
+        );
+        if (hist && hist[0]) targetCompte = String(hist[0].compte).trim();
+      } catch (e) {}
+
+      if (!targetCompte) {
+        const digits = bqCode.replace(/\D/g, '');
+        if (digits) {
+          const match = (comptes_banque || []).find(b => b.compte.endsWith(digits) || b.compte.includes(digits));
+          if (match) targetCompte = match.compte;
+        }
+      }
+
+      if (!targetCompte && comptes_banque.length > 0) {
+        targetCompte = comptes_banque[0].compte;
+      }
+      if (!targetCompte) targetCompte = '521100';
+
+      const accountObj = (comptes_banque || []).find(b => b.compte === targetCompte)
+        || (allTresoArray || []).find(b => b.compte === targetCompte);
+      const cleanNom = accountObj ? sanitizeLabel(accountObj.libelle) : 'Banque';
+
+      journaux_banque_details.push({
+        code_journal: bqCode,
+        compte: targetCompte,
+        nom_banque: cleanNom,
+        libelle_affiche: `${bqCode} - Banque ${cleanNom} (${targetCompte})`
+      });
+    }
+
+    res.json({
+      journaux_achats,
+      journaux_ventes,
+      journaux_caisse,
+      journaux_banque,
+      journaux_banque_details,
+      journaux_od,
+      all_journals: allCodes.length ? allCodes : ['AC', 'VE', 'BQ', 'OD', 'CA', 'CAISPR'],
+      comptes_caisse,
+      comptes_banque,
+      comptes_mobile_money,
+      all_tresorerie,
+      tiers: dbTiers || [],
+      comptes_achats: (rawAchats || []).map(r => ({ compte: r.compte, libelle: r.libelle })),
+      comptes_ventes: (rawVentes || []).map(r => ({ compte: r.compte, libelle: r.libelle }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Saisie en 1 clic : Enregistrement d'une facture et de son règlement lié
+app.post('/api/journal/facture-express', async (req, res) => {
+  try {
+    const {
+      type, // 'achat' ou 'vente'
+      date_facture,
+      date_echeance,
+      n_facture,
+      reference,
+      tiers_nom,
+      tiers_compte,
+      compte_charge_produit,
+      libelle,
+      montant_ht,
+      taux_tva = 0,
+      montant_tva = 0,
+      montant_ttc,
+      poste_budgetaire,
+      code_journal_facture,
+      // Règlement lié :
+      regle_immediat = false,
+      date_reglement,
+      mode_reglement = 'caisse', // 'caisse' ou 'banque'
+      code_journal_reglement,
+      compte_tresorerie,
+      montant_regle,
+      reference_reglement
+    } = req.body;
+
+    if (!type || !date_facture || !n_facture || !compte_charge_produit || !libelle) {
+      return res.status(400).json({ error: 'Type, Date, N° Facture, Compte et Libellé sont obligatoires.' });
+    }
+
+    const isAchat = String(type).toLowerCase() === 'achat';
+    const ht = Math.round((parseFloat(montant_ht) || 0) * 100) / 100;
+    const tva = Math.round((parseFloat(montant_tva) || 0) * 100) / 100;
+    const ttc = Math.round((parseFloat(montant_ttc) || (ht + tva)) * 100) / 100;
+
+    if (ht <= 0 && ttc <= 0) {
+      return res.status(400).json({ error: 'Le montant de la facture doit être supérieur à zéro.' });
+    }
+
+    if ((await isOutsideActiveExercice(date_facture)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: "La date de la facture tombe hors de l'exercice actif. Déverrouillez la Zone Administrateur pour poursuivre.", code: 'ADMIN_LOCKED' });
+    }
+
+    if (regle_immediat && date_reglement && (await isOutsideActiveExercice(date_reglement)) && !hasValidAdminToken(req)) {
+      return res.status(403).json({ error: "La date du règlement tombe hors de l'exercice actif. Déverrouillez la Zone Administrateur pour poursuivre.", code: 'ADMIN_LOCKED' });
+    }
+
+    // Détermination du compte de tiers
+    let effectiveTiersCompte = (tiers_compte || '').trim();
+    if (!effectiveTiersCompte) {
+      effectiveTiersCompte = isAchat ? '401100' : '411100';
+    }
+    const cleanTiersNom = (tiers_nom || '').trim() || (isAchat ? 'FOURNISSEUR DIVERS' : 'CLIENT DIVERS');
+
+    // Détermination des codes journaux
+    const journalFacture = (code_journal_facture || '').trim() || (isAchat ? 'AC' : 'VE');
+    const isBanque = String(mode_reglement).toLowerCase() === 'banque';
+    const isMobileMoney = String(mode_reglement).toLowerCase() === 'mobile_money';
+    const modePaiementStr = isBanque ? 'Banque' : (isMobileMoney ? 'Mobile Money' : 'Caisse');
+    const defaultJournalReglement = isBanque ? 'BQ' : (isMobileMoney ? 'OD' : 'CA');
+    const journalReglement = (code_journal_reglement || '').trim() || defaultJournalReglement;
+    const defaultCompteTreso = isBanque ? '52110017' : (isMobileMoney ? '55410001' : '57111001');
+    const effectiveCompteTreso = (compte_tresorerie || '').trim() || defaultCompteTreso;
+
+    const regle = Math.round((parseFloat(montant_regle) || ttc) * 100) / 100;
+    const soldeRestant = Math.max(0, ttc - regle);
+
+    // Code de lettrage si la facture est intégralement réglée
+    const codeLettrage = (regle_immediat && regle >= ttc) 
+      ? ('L' + Math.random().toString(36).substring(2, 7).toUpperCase())
+      : null;
+
+    const pieceIdFacture = crypto.randomUUID();
+    const pieceIdReglement = regle_immediat ? crypto.randomUUID() : null;
+
+    // Construction des lignes de facture
+    const invoiceLines = [];
+    if (isAchat) {
+      // Débit Charge (HT)
+      invoiceLines.push({
+        compte: compte_charge_produit,
+        compte_tiers: cleanTiersNom,
+        libelle: libelle,
+        debit: ht,
+        credit: 0
+      });
+      // Débit TVA Déductible (si > 0)
+      if (tva > 0) {
+        invoiceLines.push({
+          compte: '445100',
+          compte_tiers: cleanTiersNom,
+          libelle: `TVA déductible (${taux_tva || 19.25}%) - ${libelle}`,
+          debit: tva,
+          credit: 0,
+          tva_taux: parseFloat(taux_tva) || 19.25,
+          tva_montant: tva
+        });
+      }
+      // Crédit Fournisseur (TTC)
+      invoiceLines.push({
+        compte: effectiveTiersCompte,
+        compte_tiers: cleanTiersNom,
+        libelle: `Facture ${n_facture} - ${cleanTiersNom}`,
+        debit: 0,
+        credit: ttc,
+        statut_lettrage: codeLettrage ? 'lettre' : 'non_lettre',
+        code_lettrage: codeLettrage,
+        date_lettrage: codeLettrage ? (date_reglement || date_facture) : null
+      });
+    } else {
+      // Vente :
+      // Débit Client (TTC)
+      invoiceLines.push({
+        compte: effectiveTiersCompte,
+        compte_tiers: cleanTiersNom,
+        libelle: `Facture ${n_facture} - ${cleanTiersNom}`,
+        debit: ttc,
+        credit: 0,
+        statut_lettrage: codeLettrage ? 'lettre' : 'non_lettre',
+        code_lettrage: codeLettrage,
+        date_lettrage: codeLettrage ? (date_reglement || date_facture) : null
+      });
+      // Crédit Produit (HT)
+      invoiceLines.push({
+        compte: compte_charge_produit,
+        compte_tiers: cleanTiersNom,
+        libelle: libelle,
+        debit: 0,
+        credit: ht
+      });
+      // Crédit TVA Collectée (si > 0)
+      if (tva > 0) {
+        invoiceLines.push({
+          compte: '443100',
+          compte_tiers: cleanTiersNom,
+          libelle: `TVA collectée (${taux_tva || 19.25}%) - ${libelle}`,
+          debit: 0,
+          credit: tva,
+          tva_taux: parseFloat(taux_tva) || 19.25,
+          tva_montant: tva
+        });
+      }
+    }
+
+    // Construction des lignes de règlement (si applicable)
+    const paymentLines = [];
+    if (regle_immediat && regle > 0) {
+      const pDate = date_reglement || date_facture;
+      const pRef = reference_reglement || n_facture;
+      if (isAchat) {
+        // Débit Fournisseur (annulation de dette)
+        paymentLines.push({
+          compte: effectiveTiersCompte,
+          compte_tiers: cleanTiersNom,
+          libelle: `Règlement ${pRef} - ${cleanTiersNom}`,
+          debit: regle,
+          credit: 0,
+          statut_lettrage: codeLettrage ? 'lettre' : 'non_lettre',
+          code_lettrage: codeLettrage,
+          date_lettrage: codeLettrage ? pDate : null,
+          mode_paiement: modePaiementStr
+        });
+        // Crédit Trésorerie
+        paymentLines.push({
+          compte: effectiveCompteTreso,
+          compte_tiers: cleanTiersNom,
+          libelle: `Règlement ${pRef} - ${cleanTiersNom}`,
+          debit: 0,
+          credit: regle,
+          mode_paiement: modePaiementStr
+        });
+      } else {
+        // Vente : Débit Trésorerie (encaissement)
+        paymentLines.push({
+          compte: effectiveCompteTreso,
+          compte_tiers: cleanTiersNom,
+          libelle: `Encaissement ${pRef} - ${cleanTiersNom}`,
+          debit: regle,
+          credit: 0,
+          mode_paiement: modePaiementStr
+        });
+        // Crédit Client (solde créance)
+        paymentLines.push({
+          compte: effectiveTiersCompte,
+          compte_tiers: cleanTiersNom,
+          libelle: `Encaissement ${pRef} - ${cleanTiersNom}`,
+          debit: 0,
+          credit: regle,
+          statut_lettrage: codeLettrage ? 'lettre' : 'non_lettre',
+          code_lettrage: codeLettrage,
+          date_lettrage: codeLettrage ? pDate : null,
+          mode_paiement: modePaiementStr
+        });
+      }
+    }
+
+    // Sauvegarde en base de données
+    await new Promise((resolve, reject) => {
+      db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        const stmt = db.prepare(`
+          INSERT INTO journal (
+            code_journal, poste_budgetaire, date, compte, compte_tiers, libelle,
+            n_facture, reference, debit, credit, piece_id, statut_lettrage, code_lettrage,
+            date_lettrage, mode_paiement, date_echeance, date_reglement, tva_taux, tva_montant
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        // Lignes Facture
+        invoiceLines.forEach(l => {
+          stmt.run(
+            journalFacture,
+            poste_budgetaire || '',
+            date_facture,
+            String(l.compte),
+            String(l.compte_tiers || ''),
+            l.libelle,
+            String(n_facture || ''),
+            String(reference || ''),
+            l.debit,
+            l.credit,
+            pieceIdFacture,
+            l.statut_lettrage || 'non_lettre',
+            l.code_lettrage || null,
+            l.date_lettrage || null,
+            null,
+            date_echeance || null,
+            regle_immediat ? (date_reglement || date_facture) : null,
+            l.tva_taux || 0,
+            l.tva_montant || 0
+          );
+        });
+
+        // Lignes Règlement
+        if (paymentLines.length > 0) {
+          const pDate = date_reglement || date_facture;
+          const pRef = reference_reglement || n_facture;
+          paymentLines.forEach(l => {
+            stmt.run(
+              journalReglement,
+              poste_budgetaire || '',
+              pDate,
+              String(l.compte),
+              String(l.compte_tiers || ''),
+              l.libelle,
+              String(n_facture || ''),
+              String(pRef),
+              l.debit,
+              l.credit,
+              pieceIdReglement,
+              l.statut_lettrage || 'non_lettre',
+              l.code_lettrage || null,
+              l.date_lettrage || null,
+              l.mode_paiement || null,
+              null,
+              pDate,
+              0,
+              0
+            );
+          });
+        }
+
+        stmt.finalize();
+
+        // Upsert Tiers dans la table tiers
+        const tiersType = isAchat ? 'Fournisseur' : 'Client';
+        db.run(`
+          INSERT INTO tiers (type, nom, compte_comptable, solde)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(nom) DO UPDATE SET
+            compte_comptable = excluded.compte_comptable,
+            updated_at = CURRENT_TIMESTAMP
+        `, [tiersType, cleanTiersNom, effectiveTiersCompte, soldeRestant]);
+
+        db.run("COMMIT", (commitErr) => {
+          if (commitErr) return reject(commitErr);
+          resolve();
+        });
+      });
+    });
+
+    // Apprentissage automatique de la Mémoire Métier
+    try {
+      await learnFromJournalData([{
+        libelle: libelle,
+        compte: compte_charge_produit,
+        code_journal: journalFacture,
+        compte_tiers: cleanTiersNom
+      }]);
+    } catch (e) {}
+
+    db.ensureExercicesFromJournal().catch(() => {});
+
+    res.json({
+      success: true,
+      message: regle_immediat
+        ? `Facture ${n_facture} (${journalFacture}) et son Règlement (${journalReglement}) enregistrés en 1 clic avec succès.`
+        : `Facture ${n_facture} enregistrée avec succès dans le journal ${journalFacture}.`,
+      pieceIdFacture,
+      pieceIdReglement,
+      lettrage: codeLettrage,
+      soldeRestant,
+      details: {
+        facture: { journal: journalFacture, piece_id: pieceIdFacture, lignes: invoiceLines.length, ttc },
+        reglement: regle_immediat ? { journal: journalReglement, piece_id: pieceIdReglement, montant: regle } : null
+      }
+    });
+
+  } catch (err) {
+    console.error('Erreur facture-express:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/template', (req, res) => {
@@ -2135,8 +3526,25 @@ app.get('/api/template', (req, res) => {
     // Default to journal
     headers = ['code_journal', 'poste_budgetaire', 'date', 'compte', 'compte_tiers', 'libelle', 'n_facture', 'reference', 'debit', 'credit'];
     sampleData = [
-      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-01', compte: '601100', compte_tiers: '', libelle: 'Achat de marchandises', n_facture: 'FACT-001', reference: 'REF-99', debit: 250000, credit: 0 },
-      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-01', compte: '401100', compte_tiers: 'FO-001', libelle: 'Dette Fournisseur', n_facture: 'FACT-001', reference: 'REF-99', debit: 0, credit: 250000 }
+      // 1. Modèle Facture d'Achat & Règlement Immédiat en 1 Clic
+      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-10', compte: '601100', compte_tiers: '', libelle: 'Achat de marchandises HT', n_facture: 'FA-2026-088', reference: 'REG-CAISSE', debit: 150000, credit: 0 },
+      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-10', compte: '445400', compte_tiers: '', libelle: 'TVA déductible sur achats (19.25%)', n_facture: 'FA-2026-088', reference: 'REG-CAISSE', debit: 28875, credit: 0 },
+      { code_journal: 'AC', poste_budgetaire: 'ACHATS', date: '2026-05-10', compte: '401100', compte_tiers: 'ORANGE CI', libelle: 'Facture Fournisseur ORANGE CI', n_facture: 'FA-2026-088', reference: 'REG-CAISSE', debit: 0, credit: 178875 },
+      { code_journal: 'CA', poste_budgetaire: 'ACHATS', date: '2026-05-10', compte: '401100', compte_tiers: 'ORANGE CI', libelle: 'Règlement Fournisseur ORANGE CI', n_facture: 'FA-2026-088', reference: 'REG-CAISSE', debit: 178875, credit: 0 },
+      { code_journal: 'CA', poste_budgetaire: 'ACHATS', date: '2026-05-10', compte: '57111001', compte_tiers: '', libelle: 'Sortie Caisse Principale pour règlement', n_facture: 'FA-2026-088', reference: 'REG-CAISSE', debit: 0, credit: 178875 },
+
+      // 2. Modèle Facture de Vente & Encaissement en 1 Clic
+      { code_journal: 'VE', poste_budgetaire: 'VENTES', date: '2026-05-15', compte: '411100', compte_tiers: 'SOCIETE KOUASSI', libelle: 'Facture Client SOCIETE KOUASSI', n_facture: 'VT-2026-015', reference: 'VIR-BQ', debit: 596250, credit: 0 },
+      { code_journal: 'VE', poste_budgetaire: 'VENTES', date: '2026-05-15', compte: '701100', compte_tiers: '', libelle: 'Vente de marchandises HT', n_facture: 'VT-2026-015', reference: 'VIR-BQ', debit: 0, credit: 500000 },
+      { code_journal: 'VE', poste_budgetaire: 'VENTES', date: '2026-05-15', compte: '443100', compte_tiers: '', libelle: 'TVA facturée sur ventes (19.25%)', n_facture: 'VT-2026-015', reference: 'VIR-BQ', debit: 0, credit: 96250 },
+      { code_journal: 'BQ', poste_budgetaire: 'VENTES', date: '2026-05-15', compte: '521100', compte_tiers: '', libelle: 'Virement bancaire encaissé', n_facture: 'VT-2026-015', reference: 'VIR-BQ', debit: 596250, credit: 0 },
+      { code_journal: 'BQ', poste_budgetaire: 'VENTES', date: '2026-05-15', compte: '411100', compte_tiers: 'SOCIETE KOUASSI', libelle: 'Règlement Client encaissé', n_facture: 'VT-2026-015', reference: 'VIR-BQ', debit: 0, credit: 596250 },
+
+      // 3. Modèle Opération Diverse (OD de Salaires)
+      { code_journal: 'OD', poste_budgetaire: 'SALAIRES', date: '2026-05-31', compte: '661100', compte_tiers: '', libelle: 'Rémunérations brutes du personnel', n_facture: 'OD-PAIE-05', reference: 'PAIE', debit: 1000000, credit: 0 },
+      { code_journal: 'OD', poste_budgetaire: 'SALAIRES', date: '2026-05-31', compte: '422000', compte_tiers: 'PERSONNEL', libelle: 'Salaires nets à payer', n_facture: 'OD-PAIE-05', reference: 'PAIE', debit: 0, credit: 850000 },
+      { code_journal: 'OD', poste_budgetaire: 'SALAIRES', date: '2026-05-31', compte: '431000', compte_tiers: 'CNPS', libelle: 'Cotisations sociales CNPS', n_facture: 'OD-PAIE-05', reference: 'PAIE', debit: 0, credit: 100000 },
+      { code_journal: 'OD', poste_budgetaire: 'SALAIRES', date: '2026-05-31', compte: '447000', compte_tiers: 'IMPOTS', libelle: 'Retenues fiscales IRPP / CAC', n_facture: 'OD-PAIE-05', reference: 'PAIE', debit: 0, credit: 50000 }
     ];
     filename = 'template_journal.xlsx';
   }
@@ -3869,12 +5277,14 @@ app.get('/api/sync/status', async (req, res) => {
     const settings = await getSyncSettings();
     const pendingCount = await getPendingLocalCount();
     const lastLogs = await db.runSelect("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1");
-    const lastLog = lastLogs[0] || null;
+    const lastLog = (lastLogs && lastLogs[0]) || null;
+    const dossierId = await getActiveDossierId();
 
     res.json({
       url: settings.url,
       hasKey: !!settings.key,
       autoSync: settings.autoSync,
+      dossierId,
       pendingCount,
       lastLog
     });
@@ -3885,7 +5295,8 @@ app.get('/api/sync/status', async (req, res) => {
 
 app.post('/api/sync/push', sensitiveLimiter, async (req, res) => {
   try {
-    const result = await performPush();
+    const dossierIdOverride = req.body && req.body.dossier_id;
+    const result = await performPush(dossierIdOverride);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3895,7 +5306,8 @@ app.post('/api/sync/push', sensitiveLimiter, async (req, res) => {
 app.post('/api/sync/pull', sensitiveLimiter, async (req, res) => {
   try {
     const force = req.body && req.body.force === true;
-    const result = await performPull(force);
+    const dossierIdOverride = req.body && req.body.dossier_id;
+    const result = await performPull(force, dossierIdOverride);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -4352,6 +5764,9 @@ app.use((req, res) => {
   if (!req.path.startsWith('/api') && req.method === 'GET') {
     const indexPath = path.join(__dirname, 'public', 'index.html');
     if (fs.existsSync(indexPath)) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       return res.sendFile(indexPath);
     }
   }
@@ -4381,6 +5796,15 @@ if (!process.env.VERCEL && !process.env.NOW_BUILDER && !process.env.VERCEL_ENV) 
   server.requestTimeout = 0;
   server.headersTimeout = 60000;
   server.timeout = 0;
+
+  // Empêche le déchargement de l'event loop Node et trace les sorties
+  setInterval(() => {}, 60000);
+  process.on('beforeExit', (code) => {
+    console.log(`[Backend] Event loop empty, beforeExit called with code: ${code}`);
+  });
+  process.on('exit', (code) => {
+    console.log(`[Backend] Process exit with code: ${code}`);
+  });
 }
 
 module.exports = app;

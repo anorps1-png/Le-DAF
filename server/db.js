@@ -122,6 +122,13 @@ function openConnection(dbPath) {
 // seulement ensuite ferme l'ancienne connexion - jamais l'inverse, pour ne pas laisser `db`
 // sans connexion valide si l'ouverture du nouveau fichier échoue.
 async function switchDatabase(newPath) {
+  if (!sqlite3) {
+    try {
+      sqlite3 = require('sqlite3').verbose();
+    } catch (e) {
+      throw new Error(`Le module SQLite3 natif n'a pas pu être chargé (${e.message}). Vérifiez l'architecture de l'exécutable.`);
+    }
+  }
   // path.resolve normalise aussi bien les séparateurs (/ vs \) que les chemins relatifs, pour que
   // currentDbPath/le registre restent comparables par simple égalité de chaîne peu importe
   // comment le chemin d'origine a été fourni (DB_PATH avec des "/", chemin construit par
@@ -529,13 +536,18 @@ async function initSchema() {
     synced_at DATETIME
   )`);
 
-  // Index pour accélération foudroyante sur les grands volumes (100k+ lignes)
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_date ON journal(date)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_compte ON journal(compte)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_compte_tiers ON journal(compte_tiers)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_updated_at ON journal(updated_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_piece_id ON journal(piece_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_journal_created_at ON journal(created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_compte_date ON journal(compte, date)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_code_journal_date ON journal(code_journal, date)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_tiers_compte_date ON journal(compte_tiers, compte, date)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_gl_compte ON journal(compte, date, id, code_journal, n_facture, reference, libelle, compte_tiers, debit, credit)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_gl_journal ON journal(code_journal, date, id, compte, compte_tiers, n_facture, reference, libelle, debit, credit)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_journal_gl_tiers ON journal(compte_tiers, compte, date, id, code_journal, n_facture, reference, libelle, debit, credit, statut_lettrage, code_lettrage)`);
 
   // Knowledge Docs Table
   await run(`CREATE TABLE IF NOT EXISTS knowledge_docs (

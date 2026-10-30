@@ -99,9 +99,13 @@ const ExerciceSelector = ({ onChange }) => {
 
   const deleteExercice = async (e, ex) => {
     e.stopPropagation();
-    if (!window.confirm(`Supprimer l'exercice "${ex.libelle}" (${ex.date_debut} → ${ex.date_fin}) ? Les écritures elles-mêmes ne sont pas supprimées, seul le regroupement par exercice l'est.`)) return;
+    if (!window.confirm(`Supprimer définitivement l'exercice "${ex.libelle}" (${ex.date_debut} → ${ex.date_fin}) ainsi que TOUTES les écritures comptables rattachées à cette période ?\n\nAttention : Cette action supprimera également toutes les écritures du journal de cet exercice.`)) return;
     try {
-      await fetch(`/api/exercices/${ex.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/exercices/${ex.id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data && data.deletedJournalCount !== undefined) {
+        window.alert(`L'exercice "${ex.libelle}" et ses ${data.deletedJournalCount} écriture(s) ont été supprimés.`);
+      }
       const wasActive = active && active.id === ex.id;
       await load();
       if (wasActive) onChange && onChange(null);

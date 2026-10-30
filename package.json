@@ -2,21 +2,23 @@
   "name": "agent-ohada",
   "productName": "Agent financier",
   "description": "Agent financier — Pilotage Financier & Comptabilité OHADA",
-  "version": "2.0.3",
+  "version": "2.0.6",
   "author": "Agent financier",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node -e \"const fs=require('fs'); fs.cpSync('dist', 'server/public', {recursive:true});\"",
     "lint": "oxlint",
     "preview": "vite preview",
     "server": "node --max-old-space-size=4096 server/index.js",
     "electron": "electron .",
     "electron:dev": "vite build && electron .",
     "build:electron": "vite build && node build-installer.cjs",
-    "dist:exe": "vite build && node build-installer.cjs"
+    "dist:exe": "vite build && node build-installer.cjs",
+    "build:electron:32": "vite build && node build-installer.cjs --ia32",
+    "dist:exe:32": "vite build && node build-installer.cjs --ia32"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -69,12 +71,14 @@
     ],
     "asar": true,
     "asarUnpack": [
-      "**/node_modules/sqlite3/**/*"
+      "**/node_modules/sqlite3/**/*",
+      "**/node_modules/@napi-rs/**/*"
     ],
     "win": {
       "target": [
         "dir"
-      ]
+      ],
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
